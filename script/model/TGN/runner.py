@@ -5,7 +5,7 @@ Usage:
         --dataset paysim --protocol chronological --seed 42 [--overwrite]
         [--max-samples N] [--quick] [--device cpu]
         [--n-epoch-ss 10] [--n-epoch-sup 10] [--batch-size 100]
-        [--n-neighbors 10] [--node-dim 100] [--memory-dim 172]
+        [--n-neighbors 10] [--node-dim 172] [--memory-dim 172]
 
 Outputs under result/TGN/<dataset>/<protocol>/seed_<seed>/:
     config.json metrics.json scores.parquet timing.json warnings.json run.log
@@ -59,7 +59,8 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--n-layers", type=int, default=1)
     p.add_argument("--dropout", type=float, default=0.1)
     p.add_argument("--lr", type=float, default=3e-4)
-    p.add_argument("--node-dim", type=int, default=100)
+    # TGN adds node features to memory in graph attention; dimensions must agree.
+    p.add_argument("--node-dim", type=int, default=172)
     p.add_argument("--message-dim", type=int, default=100)
     p.add_argument("--memory-dim", type=int, default=172)
     return p.parse_args()
@@ -95,7 +96,7 @@ def main() -> None:
 
         fit_timer = Timer()
         with fit_timer:
-            scores = run_tgn(
+            scores, phase_timing = run_tgn(
                 events_with_dataset(data, args.dataset), splits,
                 device=args.device, seed=args.seed,
                 batch_size=args.batch_size, n_neighbors=args.n_neighbors,
@@ -104,7 +105,7 @@ def main() -> None:
                 n_epoch_sup=args.n_epoch_sup, lr=args.lr,
                 node_dim=args.node_dim, message_dim=args.message_dim,
                 memory_dim=args.memory_dim,
-                log=lambda m: (log.write(m + "\n"), log.flush()))
+                log=lambda m: (log.write(m + "\n"), log.flush()), return_timing=True)
         log.write(f"fit+score done in {fit_timer.seconds:.2f}s\n"); log.flush()
 
         warnings_all: list[str] = []
@@ -116,9 +117,9 @@ def main() -> None:
         metrics["status"] = "ok"
         metrics["paper_fidelity"] = "faithful"
         metrics["timing"] = {
-            "fit_seconds": round(fit_timer.seconds, 6),
-            "score_seconds": round(fit_timer.seconds, 6),
-            "throughput": round(n_total / max(fit_timer.seconds, 1e-9), 3),
+            "fit_seconds": round(phase_timing["fit_seconds"], 6),
+            "score_seconds": round(phase_timing["score_seconds"], 6),
+            "throughput": round(n_total / max(phase_timing["score_seconds"], 1e-9), 3),
         }
 
         config = {
@@ -153,9 +154,9 @@ def main() -> None:
         write_json(out_dir / "config.json", config)
         write_json(out_dir / "metrics.json", metrics)
         write_json(out_dir / "timing.json", {
-            "fit_seconds": fit_timer.seconds,
-            "score_seconds": fit_timer.seconds,
-            "throughput": n_total / max(fit_timer.seconds, 1e-9),
+            "fit_seconds": phase_timing["fit_seconds"],
+            "score_seconds": phase_timing["score_seconds"],
+            "throughput": n_total / max(phase_timing["score_seconds"], 1e-9),
         })
         write_json(out_dir / "warnings.json", {"warnings": warnings_all})
 

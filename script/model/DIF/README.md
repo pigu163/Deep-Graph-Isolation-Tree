@@ -41,15 +41,16 @@ aggregation follows the paper formula: means are taken over **all** trees.
 ## Modes
 
 * `--implementation faithful` (default): CERE + DIT + DEAS.
-  `paper_fidelity = "faithful"`.
+  `paper_fidelity = "paper_guided_temporal_reimplementation"`: paper-algorithm implementation, not a byte-for-byte copy of the authors' sklearn code.
 * `--implementation simplified`: independent random MLPs (no CERE) + DIT +
   DEAS.  `paper_fidelity = "simplified"` — **not** a paper reproduction.
 * `--no-deas`: depth-only ablation score (iForest-style).
 
 ## Config defaults and deviations
 
-Paper-specified: `r=50`, `t=6`, `T=300`, `n=256`, mini-batch `b=64`,
-max depth `J=8`.
+Paper-specified: `r=50`, `t=6`, `T=300`, `n=256`, typical max depth `J=8`.
+The authors' public code uses mini-batch `b=64`; this scalable runner defaults
+to `4096`, configurable with `--batch-size` and `--score-batch-size`.
 
 Paper **does not** specify the MLP depth / width / activation /
 initialisation / representation post-processing.  Documented fallback
@@ -57,12 +58,15 @@ initialisation / representation post-processing.  Documented fallback
 
 * hidden layers `[500, 100]`, representation dim `20`, `tanh` activation;
 * weights `~ N(0,1)`, no bias;
-* per-representation z-score (fitted on a random **train** subset) then
-  `tanh` post-processing — scaler never sees test data;
+* per-representation z-score fitted exactly on the complete model-fit split,
+  streamed in batches, then `tanh` post-processing — scaler never sees test
+  data in chronological mode;
 * no leaf-size path correction in DEAS (paper Eq. 8 uses raw path length).
 
 All deviations are written into every `result/DIF/.../config.json`
-(`deviation_notes`).
+(`deviation_notes`). Each run additionally writes `profile.json` with separate
+CERE encoding, scaler, tree-build, and tree-traversal timing. `--num-workers N` parallelises independent JIT-compiled representation traversals
+(`0`/`1` stays sequential).
 
 ## Elliptic++ transaction features
 

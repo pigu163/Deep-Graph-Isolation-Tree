@@ -53,8 +53,7 @@ DEFAULT_CONFIG = {
     "activation": "tanh",
     "weight_init": "normal(0,1)",
     "bias": False,
-    "batch_size": 64,             # CERE mini-batch in paper
-    "n_calib": 4096,
+    "batch_size": 4096,          # scalable default; author code used 64
     "score_batch_size": 4096,
 }
 
@@ -69,8 +68,13 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--device", default="cpu", choices=["cpu", "cuda"])
     p.add_argument("--overwrite", action="store_true")
-    p.add_argument("--num-workers", type=int, default=0)
-    p.add_argument("--batch-size", type=int, default=64)
+    p.add_argument("--num-workers", type=int, default=0,
+                   help="parallel JIT representation traversals; 0/1 is sequential")
+    p.add_argument("--batch-size", type=int, default=DEFAULT_CONFIG["batch_size"],
+                   help="CERE encoding batch size (author-code default: 64)")
+    p.add_argument("--score-batch-size", type=int,
+                   default=DEFAULT_CONFIG["score_batch_size"],
+                   help="DIF scoring batch size (default: 4096)")
     p.add_argument("--max-samples", type=int, default=None,
                    help="restrict scoring to the first N samples (smoke tests)")
     p.add_argument("--quick", action="store_true", help="smoke run flag")
@@ -120,7 +124,7 @@ def main() -> None:
     deas = not args.no_deas
     hidden_dim = args.hidden_dim if args.hidden_dim is not None \
         else DEFAULT_CONFIG["hidden_dim"]
-    paper_fidelity = "faithful" if cere else "simplified"
+    paper_fidelity = "paper_guided_temporal_reimplementation" if cere else "simplified"
 
     from script.model.DIF.dif import DIF
 
@@ -138,10 +142,12 @@ def main() -> None:
             deas=deas,
             random_state=args.seed,
             device=args.device,
-            n_calib=DEFAULT_CONFIG["n_calib"],
-            score_batch_size=DEFAULT_CONFIG["score_batch_size"],
+            batch_size=args.batch_size,
+            score_batch_size=args.score_batch_size,
+            num_workers=args.num_workers,
         )
-        model.fit(data.X[splits["train"][0]:splits["train"][1]])
+        fit_X = data.X if args.protocol == "transductive" else data.X[splits["train"][0]:splits["train"][1]]
+        model.fit(fit_X)
 
     score_timer = Timer()
     with score_timer:
@@ -163,6 +169,7 @@ def main() -> None:
     }
 
     model_cfg = model.config()
+    profile = model.profile()
     config = {
         "model": MODEL,
         "dataset": args.dataset,
@@ -175,6 +182,7 @@ def main() -> None:
         "deas_enabled": deas,
         "is_quick_run": bool(args.quick),
         "batch_size": args.batch_size,
+        "score_batch_size": args.score_batch_size,
         "num_workers": args.num_workers,
         "max_samples_used": args.max_samples,
         "n_representations": args.n_representations,
@@ -187,17 +195,20 @@ def main() -> None:
         "activation": model_cfg.get("activation"),
         "encoder_architecture": model_cfg.get("encoder", {}),
         "deviation_notes": [
-            "Paper Sec. 5.3 specifies r=50, t=6, n=256, J=8, b=64 but does NOT "
-            "specify the MLP depth/width/activation/initialisation.  We use the "
+            "Paper specifies r=50, t=6, n=256 and typical J=8; author code uses b=64, "
+            "while this scalable runner defaults to b=4096. The paper does NOT specify "
+            "the MLP depth/width/activation/initialisation. We use the "
             "authors' public DIF code defaults (hidden [500,100], rep 20, tanh, "
             "weights N(0,1), no bias) as a documented fallback.",
             "Per-representation z-score + tanh post-processing follows the "
-            "authors' implementation; scaler is fitted on a random subset of "
-            "the train split only (no test leakage).",
+            "authors' implementation; scaler statistics are fitted exactly on the complete "
+            "model-fit split, streamed in batches (no test leakage in chronological mode).",
             "DEAS follows paper Eq. (8): F = 2^{-E|p|/C} * E[g], C = c(256). "
             "No leaf-size path correction is added.",
             "Paper aggregates over all trees (Eq. 8); no per-representation "
             "score averaging is used.",
+            "This custom-DIT raw-path implementation is not a byte-for-byte reproduction "
+            "of the authors' sklearn IsolationForest plus leaf-size correction.",
             "elliptic_pp uses transaction-node samples; features 'local' "
             "subset by default (93 local features, see "
             "script/tabular_pipeline/schema.py and result metadata.json).",
@@ -211,6 +222,7 @@ def main() -> None:
         "score_seconds": score_timer.seconds,
         "throughput": throughput,
     })
+    write_json(out_dir / "profile.json", profile)
     write_json(out_dir / "warnings.json", {"warnings": warnings_all})
 
     split_arr = np.empty(n_total, dtype=object)
@@ -238,7 +250,8 @@ def main() -> None:
     # ---- data-interface check (task Sec. 10.4 / 14) ----------------------
     write_json(out_dir / "interface_check.json", tabular_interface_check(
         data.X, data.y, data.label_available, data.sample_ids,
-        data.feature_names, scores, fitted_on="train"))
+        data.feature_names, scores,
+        fitted_on="all" if args.protocol == "transductive" else "train"))
 
     with open(log_path, "w", encoding="utf-8") as log:
         log.write(f"DIF runner | dataset={args.dataset} protocol={args.protocol} "

@@ -17,6 +17,64 @@ from __future__ import annotations
 
 import numpy as np
 
+try:  # numba is present in the project environment; retain a safe fallback.
+    from numba import njit, set_num_threads
+except ImportError:  # pragma: no cover - exercised only in minimal installs
+    njit = None
+    set_num_threads = None
+
+
+def _traverse_numpy(proj, feature, threshold, left, right, is_leaf, max_depth):
+    """Fallback used only when numba is unavailable."""
+    b = proj.shape[0]
+    cur = np.zeros(b, dtype=np.int64)
+    path = np.zeros(b, dtype=np.float64)
+    beta = np.zeros(b, dtype=np.float64)
+    alive = np.ones(b, dtype=bool)
+    for _ in range(max_depth):
+        idx = np.where(alive)[0]
+        if len(idx) == 0:
+            break
+        c = cur[idx]
+        not_leaf = ~is_leaf[c]
+        i2 = idx[not_leaf]
+        if len(i2) == 0:
+            break
+        c2 = cur[i2]
+        dims = feature[c2]
+        vals = proj[i2, dims]
+        beta[i2] += np.abs(vals - threshold[c2])
+        path[i2] += 1.0
+        cur[i2] = np.where(vals <= threshold[c2], left[c2], right[c2])
+    return path, np.where(path > 0.0, beta / np.maximum(path, 1e-12), 0.0)
+
+
+if njit is not None:
+    @njit(cache=True)
+    def _traverse_numba(proj, feature, threshold, left, right, is_leaf, max_depth):
+        b = proj.shape[0]
+        path = np.zeros(b, dtype=np.float64)
+        g = np.zeros(b, dtype=np.float64)
+        for i in range(b):
+            node = 0
+            beta = 0.0
+            depth = 0
+            for _ in range(max_depth):
+                if is_leaf[node]:
+                    break
+                value = proj[i, feature[node]]
+                diff = value - threshold[node]
+                beta += diff if diff >= 0.0 else -diff
+                depth += 1
+                node = left[node] if value <= threshold[node] else right[node]
+            path[i] = depth
+            if depth > 0:
+                g[i] = beta / depth
+        return path, g
+else:
+    _traverse_numba = None
+
+
 __all__ = ["DeepIsolationTree"]
 
 
@@ -97,44 +155,24 @@ class DeepIsolationTree:
         return node
 
     # --------------------------------------------------------------- traverse
-    def traverse(self, proj: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Traverse a batch of projected samples.
+    def traverse(self, proj: np.ndarray, num_workers: int = 0) -> tuple[np.ndarray, np.ndarray]:
+        """Traverse a batch and return path length and mean split deviation.
 
-        Returns ``(path_length, g)`` arrays of shape ``(b,)`` where
-        ``path_length = |p(x|τ)|`` (number of branching steps) and
-        ``g = β / |p|`` (average split deviation, Eq. 7; 0 when |p| = 0).
+        The compiled loop removes repeated Python/advanced-indexing overhead.
+        ``num_workers`` is accepted as a runtime resource hint; the current
+        per-tree kernel is intentionally single-threaded because profiling
+        showed Python thread-pool traversal is slower on this workload.
         """
         if not self._fitted:
             raise RuntimeError("build() must be called before traverse()")
-        proj = np.asarray(proj, dtype=np.float64)
-        b = proj.shape[0]
-        cur = np.zeros(b, dtype=np.int64)  # root = 0
-        path = np.zeros(b, dtype=np.float64)
-        beta = np.zeros(b, dtype=np.float64)
-        alive = np.ones(b, dtype=bool)
-        feat = self.feature
-        thr = self.threshold
-        is_leaf = self.is_leaf
-
-        for _ in range(self.max_depth):
-            idx = np.where(alive)[0]
-            if len(idx) == 0:
-                break
-            c = cur[idx]
-            not_leaf = ~is_leaf[c]
-            i2 = idx[not_leaf]
-            if len(i2) == 0:
-                break
-            c2 = cur[i2]
-            dims = feat[c2]
-            vals = proj[i2, dims]
-            dev = np.abs(vals - thr[c2])
-            beta[i2] += dev
-            path[i2] += 1.0
-            go_left = vals <= thr[c2]
-            cur[i2] = np.where(go_left, self.left[c2], self.right[c2])
-        g = np.where(path > 0.0, beta / np.maximum(path, 1e-12), 0.0)
-        return path, g
+        proj = np.ascontiguousarray(proj, dtype=np.float64)
+        if _traverse_numba is not None:
+            return _traverse_numba(proj, self.feature, self.threshold,
+                                   self.left, self.right, self.is_leaf,
+                                   self.max_depth)
+        return _traverse_numpy(proj, self.feature, self.threshold,
+                               self.left, self.right, self.is_leaf,
+                               self.max_depth)
 
     def config(self) -> dict:
         return {

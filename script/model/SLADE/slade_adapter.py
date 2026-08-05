@@ -28,6 +28,7 @@ events are never used as history.
 from __future__ import annotations
 
 import math
+import time
 import sys
 from pathlib import Path
 
@@ -97,10 +98,11 @@ def run_slade(events: dict, splits: dict[str, tuple[int, int]],
               message_dim: int = 128, memory_dim: int = 256,
               memory_updater: str = "gru", message_updater: str = "mlp",
               srf: float = 0.1, drf: float = 0.1, lr_decay: float = 0.8,
-              weight_decay: float = 1e-4, log=print) -> np.ndarray:
+              weight_decay: float = 1e-4, log=print, return_timing: bool = False) -> np.ndarray | tuple[np.ndarray, dict]:
     """Train SLADE on the train split and score all events (past-only)."""
     np.random.seed(seed)
     torch.manual_seed(seed)
+    fit_started = time.perf_counter()
 
     tr_s, tr_e = splits["train"]
     full_data, max_idx = build_data(
@@ -170,7 +172,10 @@ def run_slade(events: dict, splits: dict[str, tuple[int, int]],
         scheduler.step()
         log(f"  epoch {epoch} loss={np.mean(losses):.4f}")
 
+    fit_seconds = time.perf_counter() - fit_started
+    score_started = time.perf_counter()
     # score all splits with a full past-only neighbor finder
     model.set_neighbor_finder(full_ngh_finder)
     scores = score_events(model, full_data, batch_size, n_neighbors, dev)
-    return scores
+    timing = {"fit_seconds": fit_seconds, "score_seconds": time.perf_counter() - score_started}
+    return (scores, timing) if return_timing else scores

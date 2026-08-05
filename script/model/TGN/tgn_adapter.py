@@ -24,6 +24,7 @@ Score: P(fraud | edge) from the decoder (larger = more anomalous).
 from __future__ import annotations
 
 import math
+import time
 import sys
 from pathlib import Path
 
@@ -100,11 +101,12 @@ def run_tgn(events: dict, splits: dict[str, tuple[int, int]], *,
             n_layers: int = 1, dropout: float = 0.1,
             n_epoch_ss: int = 10, n_epoch_sup: int = 10,
             lr: float = 3e-4, node_dim: int = 100, message_dim: int = 100,
-            memory_dim: int = 172, log=print) -> np.ndarray:
+            memory_dim: int = 172, log=print, return_timing: bool = False) -> np.ndarray | tuple[np.ndarray, dict]:
     """Two-stage TGN: self-supervised link prediction then supervised
     fraud-edge decoder. Returns per-event fraud probability."""
     np.random.seed(seed)
     torch.manual_seed(seed)
+    fit_started = time.perf_counter()
 
     tr_s, tr_e = splits["train"]
     full_data, max_idx = build_data(
@@ -206,10 +208,13 @@ def run_tgn(events: dict, splits: dict[str, tuple[int, int]], *,
             losses.append(loss.item())
         log(f"  stage2 epoch {epoch} loss={np.mean(losses):.4f}")
 
+    fit_seconds = time.perf_counter() - fit_started
+    score_started = time.perf_counter()
     # ---- score all splits (past-only) -------------------------------------
     tgn.set_neighbor_finder(full_ngh_finder)
     scores = score_events(tgn, decoder, full_data, batch_size, n_neighbors, dev)
-    return scores
+    timing = {"fit_seconds": fit_seconds, "score_seconds": time.perf_counter() - score_started}
+    return (scores, timing) if return_timing else scores
 
 
 def events_with_dataset(events: dict, dataset: str) -> dict:

@@ -124,7 +124,7 @@ class TestDIF:
                    max_samples=64, max_depth=6,
                    hidden_dim=(16,), rep_dim=8,
                    cere=cere, random_state=kw.pop("seed", 42),
-                   n_calib=128, score_batch_size=128, **kw)
+                   batch_size=kw.pop("batch_size", 128), score_batch_size=128, **kw)
 
     def test_fit_score_runs(self):
         X, _ = _synthetic()
@@ -149,6 +149,18 @@ class TestDIF:
         model.score_batch_size = 16
         batched = model.score(X)
         assert np.allclose(full, batched)
+
+    def test_complete_fit_split_scaler_and_profile(self):
+        X, _ = _synthetic()
+        model = self._small_dif(batch_size=17)
+        model.fit(X)
+        assert model.config()["scaler_fit"] == "complete_fit_split_streamed"
+        assert model.profile()["fit_samples"] == X.shape[0]
+        model.score(X)
+        profile = model.profile()
+        assert profile["score_samples"] == X.shape[0]
+        assert profile["score_representation_encoding_seconds"] >= 0.0
+        assert profile["score_tree_traversal_seconds"] >= 0.0
 
     def test_reproducible(self):
         X, _ = _synthetic()

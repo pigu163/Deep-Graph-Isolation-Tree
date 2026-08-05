@@ -93,7 +93,7 @@ def main() -> None:
 
         fit_timer = Timer()
         with fit_timer:
-            scores = run_dyglib(
+            scores, phase_timing = run_dyglib(
                 "DyGFormer", data, splits, dataset=args.dataset,
                 device=args.device, seed=args.seed,
                 batch_size=args.batch_size, num_neighbors=args.num_neighbors,
@@ -102,7 +102,7 @@ def main() -> None:
                 feat_dim=args.feat_dim, num_epochs=args.num_epochs,
                 patch_size=args.patch_size,
                 learning_rate=args.learning_rate,
-                log=lambda m: (log.write(m + "\n"), log.flush()))
+                log=lambda m: (log.write(m + "\n"), log.flush()), return_timing=True)
         log.write(f"fit+score done in {fit_timer.seconds:.2f}s\n"); log.flush()
 
         warnings_all: list[str] = []
@@ -114,9 +114,9 @@ def main() -> None:
         metrics["status"] = "ok"
         metrics["paper_fidelity"] = "faithful"
         metrics["timing"] = {
-            "fit_seconds": round(fit_timer.seconds, 6),
-            "score_seconds": round(fit_timer.seconds, 6),
-            "throughput": round(n_total / max(fit_timer.seconds, 1e-9), 3),
+            "fit_seconds": round(phase_timing["fit_seconds"], 6),
+            "score_seconds": round(phase_timing["score_seconds"], 6),
+            "throughput": round(n_total / max(phase_timing["score_seconds"], 1e-9), 3),
         }
 
         config = {
@@ -148,9 +148,9 @@ def main() -> None:
         write_json(out_dir / "config.json", config)
         write_json(out_dir / "metrics.json", metrics)
         write_json(out_dir / "timing.json", {
-            "fit_seconds": fit_timer.seconds,
-            "score_seconds": fit_timer.seconds,
-            "throughput": n_total / max(fit_timer.seconds, 1e-9),
+            "fit_seconds": phase_timing["fit_seconds"],
+            "score_seconds": phase_timing["score_seconds"],
+            "throughput": n_total / max(phase_timing["score_seconds"], 1e-9),
         })
         write_json(out_dir / "warnings.json", {"warnings": warnings_all})
 

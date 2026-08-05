@@ -482,103 +482,6 @@ expected_changes:
 
 ---
 
-# 9. Multi-GNN
-
-```yaml
-name: Multi-GNN
-full_name: Provably Powerful Graph Neural Networks for Directed Multigraphs
-category: transaction_graph_fraud_detection
-learning: supervised
-year: 2024
-venue: AAAI
-priority: critical
-resource_cost: medium
-recommended_datasets:
-  - ibm_aml
-  - paysim
-  - elliptic_pp
-```
-
-## Why include it
-
-Multi-GNN was designed for directed multigraphs and is highly relevant to financial transaction networks containing repeated directed transactions and edge attributes. The codebase includes AML experiments and variants based on GIN, GAT, PNA, and RGCN.
-
-## Repository
-
-- Official IBM repository: https://github.com/IBM/Multi-GNN
-
-## Paper
-
-- AAAI: https://ojs.aaai.org/index.php/AAAI/article/view/29069
-- IBM Research page: https://research.ibm.com/publications/provably-powerful-graph-neural-networks-for-directed-multigraphs
-- arXiv: https://arxiv.org/abs/2306.11586
-
-## Recommended variants
-
-```yaml
-variants:
-  - GIN
-  - PNA
-  - Multi-GIN_or_Multi-PNA
-```
-
-Avoid running every architecture × augmentation combination unless performing an ablation study.
-
-## Adaptation effort
-
-```yaml
-adaptation_effort: medium
-expected_changes:
-  - convert_dataset_to_directed_multigraph
-  - preserve_parallel_edges
-  - map_transaction_labels_to_edge_labels
-  - configure_edge_features
-```
-
----
-
-# 10. FraudGT
-
-```yaml
-name: FraudGT
-full_name: A Simple, Effective, and Efficient Graph Transformer for Financial Fraud Detection
-category: transaction_graph_fraud_detection
-learning: supervised
-year: 2024
-venue: ACM ICAIF
-priority: critical
-resource_cost: medium
-recommended_datasets:
-  - ibm_aml
-  - paysim
-  - elliptic_pp
-```
-
-## Why include it
-
-FraudGT is a recent graph Transformer built specifically for fraud detection in financial transaction graphs. It is a direct modern comparison for graph-based transaction classification.
-
-## Repository
-
-- Official repository: https://github.com/junhongmit/FraudGT
-
-## Paper
-
-- ACM DL: https://dl.acm.org/doi/10.1145/3677052.3698648
-- Author-hosted PDF: https://jshun.csail.mit.edu/FraudGT.pdf
-
-## Adaptation effort
-
-```yaml
-adaptation_effort: medium
-expected_changes:
-  - convert_transaction_data_to_repository_graph_format
-  - preserve_edge_attributes_and_direction
-  - use_chronological_train_validation_test_split
-```
-
----
-
 # Recommended experiment matrix
 
 Legend:
@@ -597,8 +500,6 @@ Legend:
 | GraphMixer | - | R | R | O | R |
 | DyGFormer | - | R | R | O | R |
 | GeneralDyG | - | R | O | R/task-dependent | O |
-| Multi-GNN | - | O/static snapshots | R | - | R |
-| FraudGT | - | O/static snapshots | R | - | R |
 
 ---
 
@@ -616,9 +517,6 @@ elliptic_pp:
     - GraphMixer
     - DyGFormer
     - GeneralDyG
-  graph_supervised:
-    - Multi-GNN
-    - FraudGT
 
 ibm_aml:
   tabular:
@@ -631,9 +529,6 @@ ibm_aml:
     - GraphMixer
     - DyGFormer
     - GeneralDyG
-  graph_supervised:
-    - Multi-GNN
-    - FraudGT
 
 midas_darpa:
   tabular:
@@ -646,9 +541,6 @@ midas_darpa:
     - GraphMixer
     - DyGFormer
     - GeneralDyG
-  graph_supervised:
-    - Multi-GNN_optional
-    - FraudGT_optional
 
 paysim:
   tabular:
@@ -662,8 +554,6 @@ paysim:
     - DyGFormer
     - GeneralDyG
   graph_supervised:
-    - Multi-GNN
-    - FraudGT
 ```
 
 ---
@@ -683,10 +573,6 @@ phase_3_temporal_graph:
   - TGN
   - GraphMixer
   - DyGFormer
-
-phase_4_financial_graph_supervised:
-  - Multi-GNN
-  - FraudGT
 
 phase_5_deep_tabular:
   - Deep-SVDD
@@ -711,8 +597,6 @@ minimal_new_baselines:
     - DyGFormer
 
   transaction_graph_supervised:
-    - Multi-GNN
-    - FraudGT
 ```
 
 Together with the existing methods:
@@ -735,8 +619,6 @@ total_baseline_pool:
   - GraphMixer
   - DyGFormer
   - GeneralDyG
-  - Multi-GNN
-  - FraudGT
 ```
 
 ---
@@ -846,9 +728,6 @@ baselines/
 │   ├── tgn/
 │   ├── graphmixer/
 │   └── dygformer/
-├── transaction_graph/
-│   ├── multi_gnn/
-│   └── fraudgt/
 ├── adapters/
 │   ├── elliptic_pp.py
 │   ├── ibm_aml.py
@@ -902,7 +781,7 @@ required_artifacts:
 
 # Important exclusions
 
-The following are intentionally not included in the ten-method list:
+The following are intentionally not included in the eight-method list:
 
 ```yaml
 excluded:
@@ -937,6 +816,4 @@ repositories:
   DyGLib_TGB: https://github.com/yule-buaa/DyGLib_TGB
   CTDG_Link_Anomaly: https://github.com/timpostuvan/TGB-link-anomaly-detection
   GeneralDyG: https://github.com/YXNTU/GeneralDyG
-  Multi_GNN: https://github.com/IBM/Multi-GNN
-  FraudGT: https://github.com/junhongmit/FraudGT
 ```

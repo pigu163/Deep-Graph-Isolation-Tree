@@ -24,6 +24,7 @@ Score: P(link) from the link predictor; anomaly_score = 1 - P(link)
 from __future__ import annotations
 
 import math
+import time
 import sys
 from pathlib import Path
 
@@ -139,10 +140,11 @@ def run_dyglib(model_name: str, events: dict, splits: dict, *,
                time_gap: int = 2000, num_layers: int = 2, num_heads: int = 2,
                dropout: float = 0.1, feat_dim: int = 172,
                num_epochs: int = 5, learning_rate: float = 1e-4,
-               patch_size: int = 1, log=print) -> np.ndarray:
+               patch_size: int = 1, log=print, return_timing: bool = False) -> np.ndarray | tuple[np.ndarray, dict]:
     set_random_seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
+    fit_started = time.perf_counter()
 
     tr_s, tr_e = splits["train"]
     full_data, max_idx = build_data(
@@ -218,5 +220,9 @@ def run_dyglib(model_name: str, events: dict, splits: dict, *,
             losses.append(loss.item())
         log(f"  epoch {epoch} loss={np.mean(losses):.4f}")
 
-    return score_events(model, full_data, full_sampler, batch_size,
-                        num_neighbors, time_gap, model_name, dev)
+    fit_seconds = time.perf_counter() - fit_started
+    score_started = time.perf_counter()
+    scores = score_events(model, full_data, full_sampler, batch_size,
+                          num_neighbors, time_gap, model_name, dev)
+    timing = {"fit_seconds": fit_seconds, "score_seconds": time.perf_counter() - score_started}
+    return (scores, timing) if return_timing else scores

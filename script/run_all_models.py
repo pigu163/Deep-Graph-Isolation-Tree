@@ -38,8 +38,6 @@ RUNNERS = {
     "GraphMixer": "script/model/GraphMixer/runner.py",
     "DyGFormer": "script/model/DyGFormer/runner.py",
     "GeneralDyG": "script/model/GeneralDyG/runner.py",
-    "MultiGNN": "script/model/MultiGNN/runner.py",
-    "FraudGT": "script/model/FraudGT/runner.py",
 }
 
 
