@@ -1,0 +1,7 @@
+# Link-stream data pipeline dependencies (script/dataset/).
+# The pipeline runs on polars alone; pyarrow is optional (used only if you
+# prefer pyarrow-based Parquet IO). Versions are not pinned on purpose.
+numpy
+torch
+polars
+pyarrow
