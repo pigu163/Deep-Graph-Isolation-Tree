@@ -1,6 +1,7 @@
 source code/
 data/
 result/
+tmp/
 __pycache__/
 *.pyc
 .pytest_cache/

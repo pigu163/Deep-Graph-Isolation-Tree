@@ -30,6 +30,16 @@ RUNNERS = {
     "IF": "script/model/IF/runner.py",
     "DIF": "script/model/DIF/runner.py",
     "MAD": "script/model/MAD/runner.py",
+    "ECOD": "script/model/ECOD/runner.py",
+    "DeepSVDD": "script/model/DeepSVDD/runner.py",
+    "FFADE": "script/model/FFADE/runner.py",
+    "SLADE": "script/model/SLADE/runner.py",
+    "TGN": "script/model/TGN/runner.py",
+    "GraphMixer": "script/model/GraphMixer/runner.py",
+    "DyGFormer": "script/model/DyGFormer/runner.py",
+    "GeneralDyG": "script/model/GeneralDyG/runner.py",
+    "MultiGNN": "script/model/MultiGNN/runner.py",
+    "FraudGT": "script/model/FraudGT/runner.py",
 }
 
 

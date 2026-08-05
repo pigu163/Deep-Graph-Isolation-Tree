@@ -237,3 +237,81 @@ max_history_timestamp / history_size`，并断言
 ## 15. 结论
 
 Implemented a paper-guided reproduction using the provided source code where available.
+
+---
+
+# 附录 B：额外 baseline 复现（ECOD / Deep-SVDD / F-FADE / SLADE / TGN /
+# GraphMixer / DyGFormer / GeneralDyG / Multi-GNN / FraudGT）
+
+依据 `aml_fraud_reproducible_baselines.md`，在既有 IF/DIF/MAD 之外新增
+10 个 baseline，每个模型一个独立文件夹 `script/model/<MODEL>/`
+（含模型适配 + runner + README），共用统一 CLI 与结果契约：
+
+```bash
+/home/zhu/.conda/envs/IF/bin/python script/model/<MODEL>/runner.py \
+  --dataset <dataset> --protocol chronological --seed 42 [--max-samples N] [--quick]
+```
+
+输出 `result/<MODEL>/<DATASET>/chronological/seed_42/`（config / metrics /
+scores.parquet / timing / warnings / run.log）。`run_all_models.py` 的
+`RUNNERS` 已注册全部 13 个模型。
+
+## B.1 模型清单与实现方式
+
+| 模型 | 类别 | 学习方式 | 实现 | 分数方向 |
+|---|---|---|---|---|
+| ECOD | tabular 无监督 | 无监督 | pyod 3.6.4 原样 | decision_function，越大越异常 |
+| Deep-SVDD | tabular 无监督 | one-class | MLP 版（官方为 CNN），objective 不变 | \|\|phi(x)-c\|\|^2 |
+| F-FADE | edge-stream 无监督 | 无监督 | 官方 model.py 忠实翻译 | 频率/Poisson 率，越大越异常 |
+| SLADE | edge-stream | 自监督 | 官方源码 import | (2-drift-rec)/4 |
+| TGN | temporal graph | 两阶段（自监督+监督） | 官方源码 import | P(fraud) |
+| GraphMixer | dynamic graph | 自监督链接预测 | dyglib 官方模型 import | 1-P(link) |
+| DyGFormer | dynamic graph | 自监督链接预测 | dyglib 官方模型 import | 1-P(link) |
+| GeneralDyG | dynamic graph | 监督 | 官方模型 import（CPU 兼容副本） | P(fraud) |
+| Multi-GNN | directed multigraph | 监督 | 官方 GINe + LinkNeighborLoader | P(fraud) |
+| FraudGT | transaction graph | 监督 | 官方 graphgym 管线 | P(fraud) |
+
+## B.2 数据适配（数据文件未改动）
+
+- **tabular**（ECOD、Deep-SVDD）：复用 `script/tabular_pipeline`
+  （与 IF/DIF 同一特征视图，sender/receiver ID 不直接作为数值特征）。
+- **edge-stream / temporal graph / transaction graph**：统一读
+  `data/processed/<dataset>/events.parquet`（`script/common/events.py`），
+  节点 ID 在 adapter 内重映射为连续整数；chronological 60/20/20 split
+  来自 `splits.json`；监督模型只用 train split 标签，unknown(-1) 标签
+  排除出 loss 但保留评分。
+- **边特征**：数值 `f_*` 列（NaN→0）；类别列（edge_type /
+  payment_currency / receiving_currency）ordinal 编码；无特征数据集
+  （midas/elliptic）用哑特征。
+- **泄漏控制**：所有需要历史的模型（SLADE/TGN/GraphMixer/DyGFormer/
+  GeneralDyG）的邻居/子图均严格 past-only（`np.searchsorted(..., 'left')`
+  或事件序截断）；GeneralDyG 原论文用全图构建 ego-graph，已改为
+  past-only（config 记录）。
+
+## B.3 已知适配偏差（各模型 README/config 有详细记录）
+
+- Deep-SVDD：AE 预训练可选（默认关）；CNN→MLP。
+- F-FADE：时隙化（paysim/elliptic/midas 原生步，IBM 1h bin）；global
+  F_FAC 在 |V|^2>4e6 时降级为 local（大图可行性）。
+- GeneralDyG：CensNet GraphConvolution 与 CombinedModel 复制并去除
+  硬编码 `.to('cuda')`（CPU 兼容）；ego-graph past-only。
+- FraudGT：cfg yaml 与仓库 schema 不同步（wandb/add_ports 等键被
+  prune）；`torch.load` patch `weights_only=False`（torch>=2.6 兼容）；
+  add_ports/reverse_mp 关闭。
+- 监督模型（TGN/Multi-GNN/FraudGT/GeneralDyG/DyGFormer 监督变体）与
+  无监督模型分开报告（`metrics.json.paper_fidelity` 与
+  `config.json.learning` 标注）。
+
+## B.4 验证状态
+
+- 全部 13 个 runner 通过 `--help` 加载检查；10 个新模型均完成
+  `--quick` smoke（paysim 或 ibm_hi_small 小样本）并产出完整结果文件。
+- 正式实验（全量数据集 × 多 seed）待用户确认后运行
+  （当前 `--quick` 结果被 `evaluate_all.py` 跳过，不入汇总）。
+
+## B.5 新增依赖（安装到 /home/zhu/.conda/envs/IF）
+
+pandas 3.0.5 / numba 0.66.0 / pyod 3.6.4 / yacs / torchmetrics 1.9.0 /
+datatable 1.1.0 / munch / imblearn 0.14.2 / h5py 3.16.0 / tabulate /
+wandb 0.28.1 / ogb / gdown（torch_geometric 2.8 / torch_scatter /
+torch_sparse 已存在）。
