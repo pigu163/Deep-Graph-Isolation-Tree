@@ -67,11 +67,8 @@ class ReservoirConfig:
     max_depth: int | None = None
     max_split_retries: int = 8
     split_eps: float = 1e-8
-    same_timestamp_update_aggregation: str = "mean"
-    # TGN-style execution: contiguous chronological mini-batches share the
-    # pre-batch ESN/motif state; their messages are committed together before
-    # the next batch. This preserves causal stream processing while allowing
-    # batch feature construction and forest inference.
+    # Contiguous chronological mini-batches share the pre-batch state. Repeated
+    # endpoint updates are averaged before the batch is committed.
     batch_size: int = 256
     state_update_mode: str = "batch"
     device: str = "cpu"
@@ -120,19 +117,22 @@ def _raw_layout(name: str, size: int, rng: np.random.Generator, cfg: ReservoirCo
 
 
 class ContractiveReservoir:
-    """One independently seeded, frozen active-pair echo-state reservoir."""
+    """One independently seeded, frozen endpoint-wise echo-state reservoir."""
     def __init__(self, edge_dim: int, cfg: ReservoirConfig, seed: int):
         if not (0 < cfg.leak_rate <= 1 and 0 < cfg.target_operator_norm < 1):
             raise ValueError("leak_rate and target_operator_norm must be strictly in (0, 1)")
         self.cfg, self.seed, self.edge_dim = cfg, int(seed), int(edge_dim)
         self.rng = np.random.default_rng(seed)
-        self.input_dim = edge_dim + 2 * cfg.time_dim + 2
-        size = 2 * cfg.state_dim
+        self.event_input_dim = edge_dim + 2 * cfg.time_dim + 2
+        self.endpoint_input_dim = self.event_input_dim + 1  # final value is the endpoint role
+        size = cfg.state_dim
         raw = _raw_layout(cfg.recurrent_layout, size, self.rng, cfg)
         self.w_res = cfg.target_operator_norm * raw / _operator_norm(raw)
-        self.w_in = self.rng.normal(0., cfg.input_scale / math.sqrt(self.input_dim), (size, self.input_dim))
+        self.w_in = self.rng.normal(
+            0., cfg.input_scale / math.sqrt(self.endpoint_input_dim),
+            (size, self.endpoint_input_dim))
         self.bias = self.rng.uniform(-cfg.bias_scale, cfg.bias_scale, size)
-        qdim = size + self.input_dim
+        qdim = 2 * size + self.event_input_dim
         self.w_event = self.rng.normal(0., cfg.projection_scale / math.sqrt(qdim), (cfg.embedding_dim, qdim))
         self.b_event = self.rng.uniform(-cfg.bias_scale, cfg.bias_scale, cfg.embedding_dim)
         self.states: dict[int, np.ndarray] = {}
@@ -162,30 +162,40 @@ class ContractiveReservoir:
     def encode_group(self, src: np.ndarray, dst: np.ndarray, feat: np.ndarray,
                      src_gap: np.ndarray, dst_gap: np.ndarray,
                      src_new: np.ndarray, dst_new: np.ndarray) -> tuple[np.ndarray, tuple[np.ndarray, np.ndarray]]:
-        """Encode one chronological mini-batch and return deferred ESN updates.
+        """Encode one chronological mini-batch and return deferred updates.
 
-        The state update is intentionally delayed until the complete batch has
-        been scored (the TGN memory-update convention).  Candidate states are
-        returned as two contiguous arrays rather than Python lists per node;
-        this removes per-event allocation and stacking from the hot path.
+        Shapes: B=batch size, D=node state, A=event input, H=embedding.
+        Endpoint recurrence is node-separable, so averaging repeated-node
+        candidates preserves the verified ESN contraction bound.
         """
         zero = np.zeros(self.cfg.state_dim)
-        old_src = np.stack([self.states.get(int(x), zero) for x in src])
-        old_dst = np.stack([self.states.get(int(x), zero) for x in dst])
-        a = np.concatenate([feat, self._time(src_gap), self._time(dst_gap), src_new[:, None], dst_new[:, None]], axis=1)
-        q = np.concatenate([old_src, old_dst, a], axis=1)
-        embed = np.tanh(q @ self.w_event.T + self.b_event)
+        old_src = np.stack([self.states.get(int(x), zero) for x in src])  # [B, D]
+        old_dst = np.stack([self.states.get(int(x), zero) for x in dst])  # [B, D]
+        event_input = np.concatenate([
+            feat, self._time(src_gap), self._time(dst_gap),
+            src_new[:, None], dst_new[:, None],
+        ], axis=1)  # [B, A]
+
+        # Pair embedding retains ordered sender/receiver history: [B, 2D + A] -> [B, H].
+        pair_input = np.concatenate([old_src, old_dst, event_input], axis=1)
+        embed = np.tanh(pair_input @ self.w_event.T + self.b_event)
         embed = (embed - embed.mean(axis=1, keepdims=True)) / np.sqrt(embed.var(axis=1, keepdims=True) + 1e-5)
-        old = np.concatenate([old_src, old_dst], axis=1)
-        candidate = np.tanh(a @ self.w_in.T + old @ self.w_res.T + self.bias)
-        fresh = (1. - self.cfg.leak_rate) * old + self.cfg.leak_rate * candidate
+
+        # Flatten endpoints: [B,D] + [B,D] -> [2B,D]. Role 0=sender, 1=receiver.
+        old_endpoint = np.concatenate([old_src, old_dst], axis=0)
+        role = np.concatenate([np.zeros(len(src)), np.ones(len(dst))])[:, None]
+        endpoint_input = np.concatenate([
+            np.concatenate([event_input, event_input], axis=0), role,
+        ], axis=1)  # [2B, A + 1]
+        candidate = np.tanh(
+            endpoint_input @ self.w_in.T + old_endpoint @ self.w_res.T + self.bias)
+        fresh = ((1. - self.cfg.leak_rate) * old_endpoint
+                 + self.cfg.leak_rate * candidate)  # [2B, D]
         pending_nodes = np.concatenate([src, dst]).astype(np.int64, copy=False)
-        pending_values = np.concatenate(
-            [fresh[:, :self.cfg.state_dim], fresh[:, self.cfg.state_dim:]], axis=0)
-        return embed, (pending_nodes, pending_values)
+        return embed, (pending_nodes, fresh)
 
     def commit(self, pending: tuple[np.ndarray, np.ndarray]) -> None:
-        """Aggregate deferred updates with one vectorized reduce per batch."""
+        """Mean repeated-node candidates and commit one state per active node."""
         nodes, values = pending
         if len(nodes) == 0:
             return
@@ -404,12 +414,11 @@ class TemporalMotifReservoirDIF:
     def _encode_cuda_bank(self, src: np.ndarray, dst: np.ndarray, feat: np.ndarray,
                           src_gap: np.ndarray, dst_gap: np.ndarray,
                           src_new: np.ndarray, dst_new: np.ndarray) -> tuple[np.ndarray, list[tuple[np.ndarray, np.ndarray]]]:
-        """CERE-inspired batched ESN forward for all fixed reservoirs.
+        """Run all independent endpoint-wise reservoirs in one CUDA bank.
 
-        The reservoirs retain independent, frozen weights.  As in DIF CERE,
-        their batch dimension is stacked so the expensive matrix operations are
-        launched together.  Dynamic dictionaries and motif context remain on
-        CPU; only dense ESN algebra crosses to CUDA.
+        Shapes: R=reservoirs, B=events, D=node state, A=event input,
+        P=A+1 endpoint input, H=embedding. Only dense algebra runs on CUDA;
+        sparse node dictionaries and motif context remain on CPU.
         """
         if torch is None:  # defensive; __init__ already validates CUDA
             raise RuntimeError("torch is required for CUDA execution")
@@ -418,17 +427,19 @@ class TemporalMotifReservoirDIF:
         old_src = np.stack([
             np.stack([reservoir.states.get(int(node), zero) for node in src])
             for reservoir in self.reservoirs
-        ]).astype(np.float32, copy=False)
+        ]).astype(np.float32, copy=False)  # [R, B, D]
         old_dst = np.stack([
             np.stack([reservoir.states.get(int(node), zero) for node in dst])
             for reservoir in self.reservoirs
-        ]).astype(np.float32, copy=False)
-        # Time encodings depend only on the event batch and shared config.
+        ]).astype(np.float32, copy=False)  # [R, B, D]
+
+        # Event inputs are shared by the R frozen reservoirs: [B, A].
         base = self.reservoirs[0]
-        inputs = np.concatenate([
+        event_input = np.concatenate([
             feat, base._time(src_gap), base._time(dst_gap),
             src_new[:, None], dst_new[:, None],
         ], axis=1).astype(np.float32, copy=False)
+
         if self._cuda_weights is None:
             self._cuda_weights = tuple(
                 torch.as_tensor(np.stack(values).astype(np.float32), device="cuda")
@@ -441,18 +452,31 @@ class TemporalMotifReservoirDIF:
                 )
             )
         w_event, b_event, w_in, w_res, bias = self._cuda_weights
-        old = self._cuda_from_numpy("old_state", np.concatenate([old_src, old_dst], axis=2))
-        a = self._cuda_from_numpy("event_input", inputs).unsqueeze(0).expand(r_count, -1, -1)
-        q = torch.cat([old, a], dim=2)
-        embeds = torch.tanh(torch.bmm(q, w_event.transpose(1, 2)) + b_event[:, None, :])
+
+        # Ordered pair projection: [R,B,2D+A] @ [R,2D+A,H] -> [R,B,H].
+        pair_state = self._cuda_from_numpy(
+            "pair_state", np.concatenate([old_src, old_dst], axis=2))
+        event_a = self._cuda_from_numpy("event_input", event_input).unsqueeze(0).expand(r_count, -1, -1)
+        pair_input = torch.cat([pair_state, event_a], dim=2)
+        embeds = torch.tanh(torch.bmm(pair_input, w_event.transpose(1, 2)) + b_event[:, None, :])
         embeds = (embeds - embeds.mean(dim=2, keepdim=True)) / torch.sqrt(embeds.var(dim=2, keepdim=True, correction=0) + 1e-5)
-        candidate = torch.tanh(torch.bmm(a, w_in.transpose(1, 2)) + torch.bmm(old, w_res.transpose(1, 2)) + bias[:, None, :])
-        fresh = ((1. - self.cfg.leak_rate) * old + self.cfg.leak_rate * candidate).cpu().numpy()
+
+        # Endpoint recurrence: [R,2B,P] and [R,2B,D] -> [R,2B,D].
+        old_endpoint = self._cuda_from_numpy(
+            "endpoint_state", np.concatenate([old_src, old_dst], axis=1))
+        role = np.concatenate([np.zeros(len(src)), np.ones(len(dst))])[:, None]
+        endpoint_input = np.concatenate([
+            np.concatenate([event_input, event_input], axis=0), role,
+        ], axis=1).astype(np.float32, copy=False)
+        endpoint_a = self._cuda_from_numpy(
+            "endpoint_input", endpoint_input).unsqueeze(0).expand(r_count, -1, -1)
+        candidate = torch.tanh(
+            torch.bmm(endpoint_a, w_in.transpose(1, 2))
+            + torch.bmm(old_endpoint, w_res.transpose(1, 2)) + bias[:, None, :])
+        fresh = ((1. - self.cfg.leak_rate) * old_endpoint
+                 + self.cfg.leak_rate * candidate).cpu().numpy()
         pending_nodes = np.concatenate([src, dst]).astype(np.int64, copy=False)
-        pending = [
-            (pending_nodes, np.concatenate([fresh[i, :, :state_dim], fresh[i, :, state_dim:]], axis=0))
-            for i in range(r_count)
-        ]
+        pending = [(pending_nodes, fresh[i]) for i in range(r_count)]
         return embeds.cpu().numpy(), pending
 
     @property
@@ -473,8 +497,8 @@ class TemporalMotifReservoirDIF:
         pos = 0
         while pos < n:
             end = min(pos + batch_size, n)
-            # TGN-style mini-batch: all query links see the pre-batch state;
-            # their state messages are committed only after batch scoring.
+            # All links read the pre-batch state. Endpoint candidates are
+            # averaged by node and committed only after batch scoring.
             ix = order[pos:end]; src, dst = data["src"][ix], data["dst"][ix]
             now = np.asarray(data["timestamp"][ix], dtype=np.float64)
             src_gap = np.array([float(now[i]) - temporal.last.get(int(x), float(now[i])) for i, x in enumerate(src)])
@@ -537,5 +561,6 @@ class TemporalMotifReservoirDIF:
         for r in model.reservoirs: r.verify()
         return model
     def metadata(self) -> dict[str, Any]:
-        return {"model_name": "TemporalMotifReservoirDIF", "version": "0.4.0", "detection_level": "transaction", "causal": True,
-                "trained_neural_parameters": False, "strict_active_pair_contraction": True, "execution_device": self.cfg.device, "config": asdict(self.cfg)}
+        return {"model_name": "TemporalMotifReservoirDIF", "version": "0.5.0", "detection_level": "transaction", "causal": True,
+                "trained_neural_parameters": False, "strict_active_endpoint_contraction": True,
+                "execution_device": self.cfg.device, "config": asdict(self.cfg)}
