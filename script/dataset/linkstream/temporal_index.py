@@ -299,6 +299,55 @@ class TemporalSubgraph:
     edge_feat: torch.Tensor | None
 
 
+@dataclass
+class TemporalNeighborBatch:
+    """Fixed-width, TGN-style past-neighbor references for a query batch."""
+
+    event_ids: torch.LongTensor
+    valid: torch.BoolTensor
+
+
+def sample_temporal_neighbors(
+    index: TemporalNeighborIndex,
+    *,
+    node_ids: np.ndarray,
+    cut_timestamps: np.ndarray,
+    n_neighbors: int = 20,
+    direction: str = "both",
+) -> TemporalNeighborBatch:
+    """Return fixed-width recent neighbors before each query timestamp.
+
+    This TGN-style alternative to ``sample_temporal_subgraph`` uses ``-1``
+    padding in an ``[B, K]`` event-id matrix. It returns references to the
+    canonical event table, not copied edge features.
+    """
+    node_ids = np.asarray(node_ids, dtype=np.int64)
+    cut_timestamps = np.asarray(cut_timestamps, dtype=np.float64)
+    if node_ids.ndim != 1 or cut_timestamps.ndim != 1 or len(node_ids) != len(cut_timestamps):
+        raise ValueError("node_ids and cut_timestamps must be aligned 1-D arrays")
+    if n_neighbors < 1:
+        raise ValueError("n_neighbors must be >= 1")
+    if direction not in ("out", "in", "both"):
+        raise ValueError("direction must be 'out', 'in' or 'both'")
+    offsets, values = {
+        "out": (index.src_offsets, index.src_event_ids),
+        "in": (index.dst_offsets, index.dst_event_ids),
+        "both": (index.node_offsets, index.node_event_ids),
+    }[direction]
+    out = np.full((len(node_ids), n_neighbors), -1, dtype=np.int64)
+    for row, (node, cutoff) in enumerate(zip(node_ids, cut_timestamps)):
+        if node < 0 or node >= index.num_nodes:
+            raise IndexError(f"node_id {node} out of range")
+        start, end = offsets[node], offsets[node + 1]
+        segment = values[start:end]
+        # ``side='left'`` excludes all interactions at the query timestamp.
+        before = int(np.searchsorted(index.timestamps[segment], cutoff, side="left"))
+        keep = segment[max(0, before - n_neighbors):before]
+        out[row, n_neighbors - len(keep):] = keep
+    return TemporalNeighborBatch(
+        event_ids=torch.from_numpy(out), valid=torch.from_numpy(out >= 0))
+
+
 def sample_temporal_subgraph(
     index: TemporalNeighborIndex,
     event_id: int,

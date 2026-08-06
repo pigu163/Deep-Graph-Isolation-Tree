@@ -14,7 +14,12 @@ import numpy as np
 import torch
 
 from .datasets import LinkStreamDataset
-from .temporal_index import TemporalNeighborIndex, sample_temporal_subgraph
+from .temporal_index import (
+    TemporalNeighborBatch,
+    TemporalNeighborIndex,
+    sample_temporal_neighbors,
+    sample_temporal_subgraph,
+)
 
 
 @dataclass
@@ -36,7 +41,7 @@ def collate_link_stream(samples: list[dict]) -> LinkStreamBatch:
         event_id=torch.tensor([s["event_id"] for s in samples], dtype=torch.long),
         src=torch.tensor([s["src"] for s in samples], dtype=torch.long),
         dst=torch.tensor([s["dst"] for s in samples], dtype=torch.long),
-        ts=torch.tensor([s["ts"] for s in samples], dtype=torch.float32),
+        ts=torch.tensor([s["ts"] for s in samples], dtype=torch.float64),
         label=torch.tensor([s["label"] for s in samples], dtype=torch.long),
         label_available=torch.tensor(
             [s["label_available"] for s in samples], dtype=torch.bool),
@@ -127,3 +132,32 @@ class TemporalContextCollator:
             for eid in batch.event_id.tolist()
         ]
         return {"events": batch, "contexts": contexts}
+
+
+class DenseTemporalNeighborCollator:
+    """Attach TGN-style fixed-width past-neighbor references to a batch."""
+
+    def __init__(self, temporal_index: TemporalNeighborIndex, *,
+                 n_neighbors: int = 20, direction: str = "both") -> None:
+        self.temporal_index = temporal_index
+        self.n_neighbors = n_neighbors
+        self.direction = direction
+
+    def __call__(self, samples: list[dict]) -> dict:
+        batch = collate_link_stream(samples)
+        ts = batch.ts.detach().cpu().numpy().astype(np.float64)
+        src_context: TemporalNeighborBatch = sample_temporal_neighbors(
+            self.temporal_index,
+            node_ids=batch.src.detach().cpu().numpy(),
+            cut_timestamps=ts,
+            n_neighbors=self.n_neighbors,
+            direction=self.direction,
+        )
+        dst_context: TemporalNeighborBatch = sample_temporal_neighbors(
+            self.temporal_index,
+            node_ids=batch.dst.detach().cpu().numpy(),
+            cut_timestamps=ts,
+            n_neighbors=self.n_neighbors,
+            direction=self.direction,
+        )
+        return {"events": batch, "src_context": src_context, "dst_context": dst_context}

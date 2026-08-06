@@ -10,6 +10,7 @@ import torch
 
 from linkstream import schema
 from linkstream.collate import (
+    DenseTemporalNeighborCollator,
     TemporalContextCollator,
     collate_link_stream,
     make_link_stream_loader,
@@ -73,7 +74,7 @@ class TestCollate(unittest.TestCase):
         self.assertEqual(batch.src.tolist(), [1, 3])
         self.assertEqual(batch.ts.tolist(), [1.0, 2.0])
         self.assertEqual(batch.src.dtype, torch.long)
-        self.assertEqual(batch.ts.dtype, torch.float32)
+        self.assertEqual(batch.ts.dtype, torch.float64)
         self.assertEqual(batch.label.dtype, torch.long)
         self.assertEqual(batch.label_available.dtype, torch.bool)
         self.assertIsNone(batch.edge_feat)
@@ -147,6 +148,18 @@ class TestContextCollator(unittest.TestCase):
         for c, eid in zip(contexts, batch.event_id.tolist()):
             self.assertTrue(torch.all(c.event_ids < eid),
                             f"leak in context of event {eid}")
+
+    def test_dense_tgn_style_context_batch(self):
+        collator = DenseTemporalNeighborCollator(self.index, n_neighbors=2)
+        out = collator([self.dataset[i] for i in range(4)])
+        self.assertEqual(tuple(out["src_context"].event_ids.shape), (4, 2))
+        self.assertEqual(tuple(out["dst_context"].event_ids.shape), (4, 2))
+        for context, ts in ((out["src_context"], out["events"].ts),
+                            (out["dst_context"], out["events"].ts)):
+            ids = context.event_ids.numpy()
+            for row, cutoff in zip(ids, ts.numpy()):
+                valid = row[row >= 0]
+                self.assertTrue(all(self.index.timestamps[e] < cutoff for e in valid))
 
     def test_requires_dataset(self):
         collator = TemporalContextCollator(self.index, num_hops=1, max_neighbors=5)

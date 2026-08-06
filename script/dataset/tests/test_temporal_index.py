@@ -17,6 +17,7 @@ import torch
 
 from linkstream.temporal_index import (
     TemporalNeighborIndex,
+    sample_temporal_neighbors,
     sample_temporal_subgraph,
 )
 
@@ -96,6 +97,24 @@ class TestIndexQueries(unittest.TestCase):
         self.assertEqual(self.index.get_past_pair_events(0, 1, 2).tolist(), [0])
         # unseen pair
         self.assertEqual(self.index.get_past_pair_events(1, 0, 3).tolist(), [])
+
+
+class TestDenseTemporalNeighborBatch(unittest.TestCase):
+    def setUp(self):
+        self.index = build_index()
+
+    def test_recent_neighbors_are_padded_and_exclude_equal_timestamp(self):
+        batch = sample_temporal_neighbors(
+            self.index,
+            node_ids=np.array([0, 2, 2]),
+            cut_timestamps=np.array([2.0, 2.0, 3.0]),
+            n_neighbors=2,
+            direction="both",
+        )
+        # Node 0 has only event 0 before t=2. Node 2 must not see either
+        # event at its own t=2, while at t=3 it sees both event 1 and 2.
+        self.assertEqual(batch.event_ids.tolist(), [[-1, 0], [-1, -1], [1, 2]])
+        self.assertEqual(batch.valid.tolist(), [[False, True], [False, False], [True, True]])
 
 
 class TestPairIndexOptional(unittest.TestCase):

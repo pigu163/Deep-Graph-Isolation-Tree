@@ -57,7 +57,9 @@ class LinkStreamDataset(torch.utils.data.Dataset):
         df = lf.collect()
 
         self.event_id = df[schema.EVENT_ID].to_numpy()
-        self.ts = df[schema.TIMESTAMP].to_numpy()
+        # IBM epoch seconds cannot be represented at minute precision by
+        # float32. Keep float64 so temporal cutoff queries remain correct.
+        self.ts = df[schema.TIMESTAMP].to_numpy().astype(np.float64, copy=False)
         self.src = df[schema.SRC].to_numpy()
         self.dst = df[schema.DST].to_numpy()
         self.label = df[schema.LABEL].to_numpy()
