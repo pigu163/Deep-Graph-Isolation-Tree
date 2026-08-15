@@ -169,7 +169,7 @@ def main(argv: list[str] | None = None) -> int:
         # Re-derive splits from the kept event-id range.
         spl = data["splits"]
         new_spl = {}
-        for name in ("train", "val", "test"):
+        for name in spl:
             lo, hi = spl[name]
             lo2 = int(np.searchsorted(data["event_id"], lo, side="left"))
             hi2 = int(np.searchsorted(data["event_id"], hi, side="left"))

@@ -9,6 +9,7 @@ subgraphs per event without changing the base loader.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import torch
@@ -35,6 +36,38 @@ class LinkStreamBatch:
     edge_feat: torch.Tensor | None
 
 
+@dataclass
+class TemporalContextBatch:
+    """Ragged temporal subgraphs packed for one seed-event batch."""
+
+    event_ids: torch.LongTensor
+    src: torch.LongTensor
+    dst: torch.LongTensor
+    ts: torch.Tensor
+    edge_feat: torch.Tensor | None
+    batch_index: torch.LongTensor
+    offsets: torch.LongTensor
+    sizes: torch.LongTensor
+    valid: torch.BoolTensor
+
+
+def pack_temporal_subgraphs(contexts: list) -> TemporalContextBatch:
+    """Flatten variable-length contexts while retaining their seed ownership."""
+    sizes = torch.tensor([len(c.event_ids) for c in contexts], dtype=torch.long)
+    offsets = torch.cat((torch.zeros(1, dtype=torch.long), sizes.cumsum(0)))
+    return TemporalContextBatch(
+        event_ids=torch.cat([c.event_ids for c in contexts]),
+        src=torch.cat([c.src for c in contexts]),
+        dst=torch.cat([c.dst for c in contexts]),
+        ts=torch.cat([c.ts for c in contexts]),
+        edge_feat=None if contexts[0].edge_feat is None else torch.cat([c.edge_feat for c in contexts]),
+        batch_index=torch.repeat_interleave(torch.arange(len(contexts)), sizes),
+        offsets=offsets,
+        sizes=sizes,
+        valid=torch.tensor([c.is_valid for c in contexts], dtype=torch.bool),
+    )
+
+
 def collate_link_stream(samples: list[dict]) -> LinkStreamBatch:
     """Stack samples into a `LinkStreamBatch`, keeping their exact order."""
     return LinkStreamBatch(
@@ -59,6 +92,7 @@ def make_link_stream_loader(
     pin_memory: bool = False,
     drop_last: bool = False,
     shuffle: bool = False,
+    collate_fn=None,
 ) -> torch.utils.data.DataLoader:
     """DataLoader factory with temporal-research-safe defaults.
 
@@ -74,7 +108,7 @@ def make_link_stream_loader(
         num_workers=num_workers,
         pin_memory=pin_memory,
         drop_last=drop_last,
-        collate_fn=collate_link_stream,
+        collate_fn=collate_fn or collate_link_stream,
     )
 
 
@@ -93,9 +127,12 @@ class TemporalContextCollator:
         *,
         dataset: LinkStreamDataset | None = None,
         num_hops: int = 1,
+        max_context_events: int | None = 500,
+        min_context_events: int = 0,
         max_neighbors: int = 20,
-        time_window: float | None = None,
+        time_window: float | None = 7 * 24 * 60 * 60,
         direction: str = "both",
+        context_workers: int = 0,
     ) -> None:
         if dataset is not None:
             self._src, self._dst, self._ts, self._edge_feat = dataset.get_arrays()
@@ -103,9 +140,14 @@ class TemporalContextCollator:
             self._src = self._dst = self._ts = self._edge_feat = None
         self.temporal_index = temporal_index
         self.num_hops = num_hops
+        self.max_context_events = max_context_events
+        self.min_context_events = min_context_events
         self.max_neighbors = max_neighbors
         self.time_window = time_window
         self.direction = direction
+        self.context_workers = max(0, int(context_workers))
+        self._pool = (ThreadPoolExecutor(max_workers=self.context_workers)
+                      if self.context_workers > 1 else None)
 
     def _require_arrays(self) -> None:
         if self._src is None:
@@ -113,25 +155,34 @@ class TemporalContextCollator:
                 "TemporalContextCollator needs a LinkStreamDataset to read "
                 "event arrays; pass dataset=... at construction")
 
-    def __call__(self, samples: list[dict]) -> dict:
+    def sample_event_ids(self, event_ids: np.ndarray | torch.Tensor | list[int]) -> list:
+        """Extract independent past contexts for one seed batch.
+
+        Threads only parallelise independent seeds. The temporal CSR index and
+        event arrays remain shared read-only rather than being copied per
+        DataLoader worker process.
+        """
         self._require_arrays()
-        batch = collate_link_stream(samples)
-        contexts = [
-            sample_temporal_subgraph(
-                self.temporal_index,
-                int(eid),
-                src_arr=self._src,
-                dst_arr=self._dst,
-                ts_arr=self._ts,
-                edge_feat=self._edge_feat,
-                num_hops=self.num_hops,
-                max_neighbors=self.max_neighbors,
-                time_window=self.time_window,
+        ids = [int(eid) for eid in np.asarray(event_ids).reshape(-1)]
+
+        def sample(eid: int):
+            return sample_temporal_subgraph(
+                self.temporal_index, eid, src_arr=self._src, dst_arr=self._dst,
+                ts_arr=self._ts, edge_feat=self._edge_feat, num_hops=self.num_hops,
+                max_neighbors=self.max_neighbors, max_context_events=self.max_context_events,
+                min_context_events=self.min_context_events, time_window=self.time_window,
                 direction=self.direction,
             )
-            for eid in batch.event_id.tolist()
-        ]
-        return {"events": batch, "contexts": contexts}
+
+        if self._pool is not None and len(ids) > 1:
+            return list(self._pool.map(sample, ids))
+        return [sample(eid) for eid in ids]
+
+    def __call__(self, samples: list[dict]) -> dict:
+        batch = collate_link_stream(samples)
+        contexts = self.sample_event_ids(batch.event_id)
+        return {"events": batch, "contexts": contexts,
+                "context_batch": pack_temporal_subgraphs(contexts)}
 
 
 class DenseTemporalNeighborCollator:

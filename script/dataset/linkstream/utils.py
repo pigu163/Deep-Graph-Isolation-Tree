@@ -138,12 +138,10 @@ def make_splits(num_events: int, train_ratio: float, val_ratio: float) -> dict[s
     if train_ratio + val_ratio > 1.0:
         raise ValueError("train_ratio + val_ratio must be <= 1")
     train_end = int(num_events * train_ratio)
+    if val_ratio == 0.0:
+        return {"train": [0, train_end], "test": [train_end, num_events]}
     val_end = int(num_events * (train_ratio + val_ratio))
-    return {
-        "train": [0, train_end],
-        "val": [train_end, val_end],
-        "test": [val_end, num_events],
-    }
+    return {"train": [0, train_end], "val": [train_end, val_end], "test": [val_end, num_events]}
 
 
 # ---------------------------------------------------------------------------

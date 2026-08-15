@@ -19,6 +19,8 @@ import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 PYTHON = "/home/zhu/.conda/envs/IF/bin/python"
 
 DEFAULT_DATASETS = ["midas_darpa", "ibm_hi_small", "ibm_li_small", "paysim", "elliptic_pp"]
@@ -29,6 +31,7 @@ DEFAULT_SEEDS = [42, 43, 44, 45, 46]
 RUNNERS = {
     "IF": "script/model/IF/runner.py",
     "DIF": "script/model/DIF/runner.py",
+    "SILIF": "script/model/SILIF/runner.py",
     "MAD": "script/model/MAD/runner.py",
     "ECOD": "script/model/ECOD/runner.py",
     "DeepSVDD": "script/model/DeepSVDD/runner.py",

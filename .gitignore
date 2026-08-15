@@ -1,10 +1,30 @@
 source code/
 data/
 result/
+experiments_result/
+/xgboost_test/
+/paper/
+/latex/
+/docs/
+/doc/
+/acm tempelate/
 tests/
 tmp/
 __pycache__/
 *.pyc
+*.orig
 .pytest_cache/
+.reasonix/
+/reasonix.toml
+/ds.txt
+.acm tempelate/
+# LaTeX build intermediates (PDFs remain reviewable artifacts).
+*.aux
+*.bbl
+*.blg
+*.log
+*.out
+*.synctex.gz
+
 pytest.ini
 AGENTS.md

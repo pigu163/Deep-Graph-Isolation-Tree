@@ -26,6 +26,7 @@ from script.tabular_pipeline.schema import (  # noqa: E402
     PROCESSED_TABULAR_NAMES,
     get_schema,
 )
+from script.tabular_pipeline.temporal_features import event_temporal_features
 from script.tabular_pipeline.transforms import (  # noqa: E402
     FrequencyEncoder,
     MeanImputer,
@@ -128,6 +129,18 @@ class TestPreprocessor:
         assert len(names) == pre.transform(frame).shape[1]
 
 
+class TestTemporalFeatures:
+    def test_past_only_and_same_timestamp_isolation(self):
+        # Rows 0/1 share time=1, so neither can see the other.
+        out = event_temporal_features(
+            np.array([0, 0, 0, 2]), np.array([1, 1, 2, 1]),
+            np.array([1., 1., 2., 3.]))
+        assert np.all(out[:2, :5] == 0)
+        assert out[2, 0] == 2 and out[2, 2] == 1
+        assert out[2, 4] == 0
+        assert out[3, 1] == 2 and out[3, 3] == 1
+        assert out[3, 6] == pytest.approx(2.)
+
 class TestDatasetBuild:
     @pytest.mark.parametrize("ds", ["midas_darpa"])
     def test_build_outputs_complete(self, tmp_path, ds):
@@ -144,7 +157,8 @@ class TestDatasetBuild:
         assert X.dtype == np.float32
         with open(out / "splits.json") as f:
             splits = json.load(f)
-        assert set(splits) == {"train", "val", "test"}
+        assert set(splits) == {"train", "test"}
+        assert splits == {"train": [0, 1400], "test": [1400, 2000]}
         for s, e in splits.values():
             assert 0 <= s <= e <= 2000
 

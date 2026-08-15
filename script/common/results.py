@@ -14,6 +14,7 @@ label_available, anomaly_score, split；模型可追加额外列。
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -31,7 +32,12 @@ __all__ = [
 ]
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-RESULT_ROOT = REPO_ROOT / "result"
+
+# Narrow, explicit result-root override (ACM experiment orchestration only).
+# When set, every runner writes its outputs under this root instead of
+# `result/`. Nothing else changes: the layout below RESULT_ROOT is identical.
+RESULT_ROOT_OVERRIDE = Path(os.environ["ACM_RESULT_ROOT"]) if os.environ.get("ACM_RESULT_ROOT") else None
+RESULT_ROOT = RESULT_ROOT_OVERRIDE if RESULT_ROOT_OVERRIDE is not None else REPO_ROOT / "result"
 
 SCORES_REQUIRED_COLUMNS = [
     "sample_id", "timestamp_or_step", "label", "label_available",

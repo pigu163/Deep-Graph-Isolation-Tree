@@ -65,11 +65,10 @@ class TestIndexQueries(unittest.TestCase):
                     self.assertTrue(np.all(hist < e),
                                     f"leak at node {node} event {e}: {hist}")
 
-    def test_equal_timestamp_ordering_follows_event_id(self):
-        # events 1 and 2 share t=2; event 1 precedes event 2 by event id.
-        # node 2's incident history before event 2 = [1] (event 2 excluded).
-        self.assertEqual(self.index.get_past_incident_events(2, 2).tolist(), [1])
-        # node 0 before event 3 sees both t=2 events: [0, 2]
+    def test_equal_timestamp_events_are_atomic(self):
+        # events 1 and 2 share t=2: neither is history for the other.
+        self.assertEqual(self.index.get_past_incident_events(2, 2).tolist(), [])
+        # A later timestamp can read both t=2 events.
         self.assertEqual(self.index.get_past_incident_events(0, 3).tolist(), [0, 2])
 
     def test_max_events(self):
@@ -154,18 +153,18 @@ class TestTemporalSubgraph(unittest.TestCase):
             **kwargs)
 
     def test_one_hop_both(self):
-        # event 2 (0->2): node 0 past = [0], node 2 past = [1]
+        # event 2 (0->2) shares t=2 with event 1, so only t=1 is history.
         sg = self._sample(2, num_hops=1, max_neighbors=20)
-        self.assertEqual(sg.event_ids.tolist(), [0, 1])
+        self.assertEqual(sg.event_ids.tolist(), [0])
         self.assertEqual(sg.node_ids.tolist(), [0, 1, 2])  # endpoints + history nodes
-        self.assertEqual(sg.src.tolist(), [0, 1])
-        self.assertEqual(sg.dst.tolist(), [1, 2])
-        self.assertEqual(sg.ts.dtype, torch.float32)
-        self.assertEqual(tuple(sg.edge_feat.shape), (2, 2))
+        self.assertEqual(sg.src.tolist(), [0])
+        self.assertEqual(sg.dst.tolist(), [1])
+        self.assertEqual(sg.ts.dtype, torch.float64)
+        self.assertEqual(tuple(sg.edge_feat.shape), (1, 2))
 
-    def test_current_event_excluded(self):
-        sg = self._sample(3, num_hops=1)
-        self.assertTrue(torch.all(sg.event_ids < 3))
+    def test_current_and_equal_timestamp_events_excluded(self):
+        sg = self._sample(2, num_hops=1)
+        self.assertTrue(torch.all(sg.ts < TS[2]))
 
     def test_direction_out(self):
         # event 3 (2->0): out history of node 2 = [] (events 1, 2 are in-edges),

@@ -7,9 +7,9 @@
 
 | dataset | 样本 | 标签 | 特征 |
 |---|---|---|---|
-| `paysim` | 一笔交易（event） | `isFraud` | `timestamp, f_amount, f_oldbalanceOrg, f_newbalanceOrig, f_oldbalanceDest, f_newbalanceDest` + `edge_type` one-hot + `src/dst` freq；`is_flagged_fraud` 被删除 |
-| `ibm_hi_small` / `ibm_li_small` | 一笔交易（event） | `Is Laundering` | `timestamp, f_amount_paid, f_amount_received, f_same_bank, f_same_currency` + `edge_type/payment_currency/receiving_currency` one-hot + `src/dst` freq |
-| `midas_darpa` | 一条通信事件 | ground-truth（按行对齐） | `timestamp` + `src/dst` freq；**不加任何复杂图统计** |
+| `paysim` | 一笔交易（event） | `isFraud` | `timestamp, f_amount, f_oldbalanceOrg, f_newbalanceOrig, f_oldbalanceDest, f_newbalanceDest` + `edge_type` one-hot + `src/dst` freq + strict past-only account/pair temporal features；`is_flagged_fraud` 被删除 |
+| `ibm_hi_small` / `ibm_li_small` | 一笔交易（event） | `Is Laundering` | `timestamp, f_amount_paid, f_amount_received, f_same_bank, f_same_currency` + `edge_type/payment_currency/receiving_currency` one-hot + `src/dst` freq + strict past-only account/pair temporal features |
+| `midas_darpa` | 一条通信事件 | ground-truth（按行对齐） | `timestamp` + `src/dst` freq + strict past-only account/pair temporal features |
 | `elliptic_pp` | **transaction node**（非 money-flow edge） | `illicit=1 / licit=0 / unknown=-1` | `time_step` + 93 个 local 特征（`txs_features.csv`，`--features local` 默认；`all` = 165） |
 
 ## 编码规则（train-only fit）
@@ -40,3 +40,7 @@ data: TabularData = load_tabular_dataset("paysim", split="all")
 
 split 为行序 60/20/20（chronological；事件数据集行序 = event_id 序，
 elliptic 按 `(time_step, txId)` 排序）。
+
+## Temporal features
+
+For IBM, PaySim and MIDAS, the shared table also includes past-only sender, receiver and directed-pair counts, unique-counterparty counts and last-seen gaps. Each timestamp group is scored before its events update state, so same-time events cannot leak into one another.

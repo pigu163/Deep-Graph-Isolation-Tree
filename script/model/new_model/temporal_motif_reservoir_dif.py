@@ -72,6 +72,12 @@ class ReservoirConfig:
     batch_size: int = 256
     state_update_mode: str = "batch"
     device: str = "cpu"
+    # Stage-C ablation switches. They change the *feature* input to the forest
+    # (and the ESN bank execution path), never the frozen DIF head semantics:
+    # the ablation runner replays the stream under a variant and scores with
+    # forests frozen from the full model.
+    no_temporal_state: bool = False   # zero endpoint ESN state, no recurrence
+    no_motif_context: bool = False    # drop motif distances/increments from forest input
 
 
 def _operator_norm(matrix: np.ndarray) -> float:
@@ -169,8 +175,15 @@ class ContractiveReservoir:
         candidates preserves the verified ESN contraction bound.
         """
         zero = np.zeros(self.cfg.state_dim)
-        old_src = np.stack([self.states.get(int(x), zero) for x in src])  # [B, D]
-        old_dst = np.stack([self.states.get(int(x), zero) for x in dst])  # [B, D]
+        if self.cfg.no_temporal_state:
+            # Ablation: no historical endpoint recurrence. Event embedding is
+            # still produced from the raw edge features / time gaps, but the
+            # endpoint state is identically zero and never updated.
+            old_src = np.zeros((len(src), self.cfg.state_dim))
+            old_dst = np.zeros((len(dst), self.cfg.state_dim))
+        else:
+            old_src = np.stack([self.states.get(int(x), zero) for x in src])  # [B, D]
+            old_dst = np.stack([self.states.get(int(x), zero) for x in dst])  # [B, D]
         event_input = np.concatenate([
             feat, self._time(src_gap), self._time(dst_gap),
             src_new[:, None], dst_new[:, None],
@@ -191,6 +204,9 @@ class ContractiveReservoir:
             endpoint_input @ self.w_in.T + old_endpoint @ self.w_res.T + self.bias)
         fresh = ((1. - self.cfg.leak_rate) * old_endpoint
                  + self.cfg.leak_rate * candidate)  # [2B, D]
+        if self.cfg.no_temporal_state:
+            # No recurrence: defer nothing; states stay empty/zero.
+            return embed, (np.zeros(0, dtype=np.int64), np.zeros((0, self.cfg.state_dim)))
         pending_nodes = np.concatenate([src, dst]).astype(np.int64, copy=False)
         return embed, (pending_nodes, fresh)
 
@@ -247,6 +263,13 @@ class TemporalMotifState:
         # repeated division/allocation in the per-event hot path.
         global_ctx = self.global_sum / max(self.global_count, 1)
         for mi, motif in enumerate(MOTIFS):
+            if self.cfg.no_motif_context:
+                # Ablation: no motif context. Distances are the embedding's
+                # deviation from the global mean (no historical motif records),
+                # and all motif increments are dropped from the forest input.
+                distances[:, mi] = np.linalg.norm(embeds - global_ctx, axis=1) / math.sqrt(self.h)
+                increments[mi] = 0.
+                continue
             records = self._context(motif, u, v, now)
             if motif is MotifType.FAN_OUT:
                 increments[mi] = float(v not in {x.dst for x in records})
@@ -424,14 +447,19 @@ class TemporalMotifReservoirDIF:
             raise RuntimeError("torch is required for CUDA execution")
         r_count, state_dim = len(self.reservoirs), self.cfg.state_dim
         zero = np.zeros(state_dim)
-        old_src = np.stack([
-            np.stack([reservoir.states.get(int(node), zero) for node in src])
-            for reservoir in self.reservoirs
-        ]).astype(np.float32, copy=False)  # [R, B, D]
-        old_dst = np.stack([
-            np.stack([reservoir.states.get(int(node), zero) for node in dst])
-            for reservoir in self.reservoirs
-        ]).astype(np.float32, copy=False)  # [R, B, D]
+        if self.cfg.no_temporal_state:
+            # Ablation: zero endpoint state, no recurrence (see CPU path).
+            old_src = np.zeros((r_count, len(src), state_dim), dtype=np.float32)
+            old_dst = np.zeros((r_count, len(dst), state_dim), dtype=np.float32)
+        else:
+            old_src = np.stack([
+                np.stack([reservoir.states.get(int(node), zero) for node in src])
+                for reservoir in self.reservoirs
+            ]).astype(np.float32, copy=False)  # [R, B, D]
+            old_dst = np.stack([
+                np.stack([reservoir.states.get(int(node), zero) for node in dst])
+                for reservoir in self.reservoirs
+            ]).astype(np.float32, copy=False)  # [R, B, D]
 
         # Event inputs are shared by the R frozen reservoirs: [B, A].
         base = self.reservoirs[0]
@@ -475,6 +503,11 @@ class TemporalMotifReservoirDIF:
             + torch.bmm(old_endpoint, w_res.transpose(1, 2)) + bias[:, None, :])
         fresh = ((1. - self.cfg.leak_rate) * old_endpoint
                  + self.cfg.leak_rate * candidate).cpu().numpy()
+        if self.cfg.no_temporal_state:
+            # No recurrence: defer nothing; states stay empty/zero.
+            return embeds.cpu().numpy(), [
+                (np.zeros(0, dtype=np.int64), np.zeros((0, state_dim))) for _ in range(r_count)
+            ]
         pending_nodes = np.concatenate([src, dst]).astype(np.int64, copy=False)
         pending = [(pending_nodes, fresh[i]) for i in range(r_count)]
         return embeds.cpu().numpy(), pending
@@ -564,3 +597,312 @@ class TemporalMotifReservoirDIF:
         return {"model_name": "TemporalMotifReservoirDIF", "version": "0.5.0", "detection_level": "transaction", "causal": True,
                 "trained_neural_parameters": False, "strict_active_endpoint_contraction": True,
                 "execution_device": self.cfg.device, "config": asdict(self.cfg)}
+\
+
+# ---------------------------------------------------------------------------
+# Pair-centric local link-stream ESN isolation forest (current implementation)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class LocalLinkStreamConfig:
+    """Frozen, stateless ESN and heterogeneous local-isolation forest config."""
+    state_dim: int = 64
+    leak_rate: float = 0.20
+    recurrent_operator_norm: float = 0.95
+    input_scale: float = 0.50
+    trees_per_family: int = 100
+    tree_sample_size: int = 64
+    min_leaf: int = 8
+    max_depth: int | None = None
+    projection_count: int = 16
+    recurrence_projection_dim: int = 4
+    calibration_size: int = 4096
+    encode_batch_size: int = 64
+    device: str = "cpu"
+
+
+def _normal_rows(rng: np.random.Generator, shape: tuple[int, ...]) -> np.ndarray:
+    """DIF-style frozen N(0,1) random representations, row-normalized."""
+    values = rng.normal(0.0, 1.0, size=shape).astype(np.float32)
+    return values / np.maximum(np.linalg.norm(values, axis=-1, keepdims=True), 1e-8)
+
+
+@dataclass
+class _LocalTree:
+    feature: np.ndarray
+    threshold: np.ndarray
+    left: np.ndarray
+    right: np.ndarray
+    depth: np.ndarray
+    leaf_size: np.ndarray
+
+    def path_length(self, q: np.ndarray) -> np.ndarray:
+        node = np.zeros(len(q), dtype=np.int32)
+        for _ in range(int(self.depth.max()) + 2):
+            feature = self.feature[node]
+            active = feature >= 0
+            if not active.any():
+                break
+            rows = np.flatnonzero(active)
+            go_left = q[rows, feature[rows]] < self.threshold[node[rows]]
+            node[rows] = np.where(go_left, self.left[node[rows]], self.right[node[rows]])
+        size = self.leaf_size[node].astype(np.float64)
+        correction = np.where(size <= 1, 0.0,
+                              2.0 * (np.log(np.maximum(size - 1.0, 1.0)) + 0.5772156649)
+                              - 2.0 * (size - 1.0) / size)
+        return self.depth[node] + correction
+
+
+def _fit_local_tree(q: np.ndarray, cfg: LocalLinkStreamConfig,
+                    rng: np.random.Generator) -> _LocalTree:
+    """Largest-valid-gap isolation tree over a bank of ESN-only projections."""
+    max_depth = cfg.max_depth or int(math.ceil(math.log2(max(cfg.tree_sample_size, 2))))
+    feature: list[int] = []
+    threshold: list[float] = []
+    left: list[int] = []
+    right: list[int] = []
+    depths: list[int] = []
+    leaf_size: list[int] = []
+
+    def build(rows: np.ndarray, level: int) -> int:
+        node = len(feature)
+        feature.append(-1); threshold.append(np.nan); left.append(-1); right.append(-1)
+        depths.append(level); leaf_size.append(len(rows))
+        if len(rows) < 2 * cfg.min_leaf or level >= max_depth:
+            return node
+        dim = int(rng.integers(q.shape[1]))
+        ordered = rows[np.argsort(q[rows, dim], kind="stable")]
+        values = q[ordered, dim]
+        slots = np.arange(cfg.min_leaf, len(ordered) - cfg.min_leaf + 1)
+        gaps = values[slots] - values[slots - 1]
+        if len(gaps) == 0 or not np.isfinite(gaps).all() or float(gaps.max()) <= 1e-8:
+            return node
+        split = int(slots[int(gaps.argmax())])
+        feature[node] = dim
+        threshold[node] = float((values[split - 1] + values[split]) / 2.0)
+        left[node] = build(ordered[:split], level + 1)
+        right[node] = build(ordered[split:], level + 1)
+        return node
+
+    build(np.arange(len(q), dtype=np.int64), 0)
+    return _LocalTree(np.asarray(feature, np.int32), np.asarray(threshold, np.float32),
+                      np.asarray(left, np.int32), np.asarray(right, np.int32),
+                      np.asarray(depths, np.float32), np.asarray(leaf_size, np.int32))
+
+
+class LocalLinkStreamESNIF:
+    """Transaction-level ESN forest with no global account memory.
+
+    Each seed's sampled local link stream is independently encoded from zero.
+    Equal-time context edges read the same prior state and update it once via
+    a mean candidate, so raw CSV row order has no temporal meaning.
+    The ESN weights and all projection banks are frozen; only random isolation
+    trees are fitted.  No label, account identifier, handcrafted AML history,
+    or global node state reaches the model.
+    """
+    families = ("departure", "surprise", "recurrence")
+
+    def __init__(self, edge_dim: int, config: LocalLinkStreamConfig | None = None,
+                 seed: int = 42) -> None:
+        if torch is None:
+            raise ImportError("PyTorch is required for LocalLinkStreamESNIF")
+        self.cfg = config or LocalLinkStreamConfig()
+        if not (0.0 < self.cfg.leak_rate <= 1.0 and 0.0 < self.cfg.recurrent_operator_norm < 1.0):
+            raise ValueError("leak_rate and recurrent_operator_norm must be in (0,1)")
+        self.edge_dim, self.seed = int(edge_dim), int(seed)
+        self.input_dim = self.edge_dim + 4  # raw edge fields + hour/week cyclic time
+        self.rng = np.random.default_rng(self.seed)
+        d, k = self.cfg.state_dim, self.cfg.projection_count
+        # DIF's source initializes frozen weights from N(0,1).  ESN recurrence
+        # is then rescaled to a sub-unit operator norm for the sufficient
+        # echo-state contraction condition.
+        raw_res = self.rng.normal(0.0, 1.0, size=(d, d))
+        operator_norm = max(float(np.linalg.svd(raw_res, compute_uv=False)[0]), 1e-6)
+        self.w_res = (raw_res * self.cfg.recurrent_operator_norm / operator_norm).astype(np.float32)
+        self.recurrent_operator_norm = float(np.linalg.svd(self.w_res, compute_uv=False)[0])
+        self.esn_contraction = ((1.0 - self.cfg.leak_rate)
+                                + self.cfg.leak_rate * self.recurrent_operator_norm)
+        if self.esn_contraction >= 1.0 + 1e-6:
+            raise ValueError("local ESN fails the sufficient contraction condition")
+        self.w_in = (self.rng.normal(0.0, 1.0, size=(d, self.input_dim))
+                     * self.cfg.input_scale / math.sqrt(self.input_dim)).astype(np.float32)
+        self.bias = self.rng.normal(0.0, 0.05, size=d).astype(np.float32)
+        self.departure_dirs = _normal_rows(self.rng, (k, d))
+        self.transition_dirs = _normal_rows(self.rng, (k, d))
+        self.recurrence_proj = _normal_rows(
+            self.rng, (k, self.cfg.recurrence_projection_dim, d))
+        self.trees: dict[str, list[_LocalTree]] = {name: [] for name in self.families}
+        self.reference_paths: dict[str, np.ndarray] = {}
+        self.mean: np.ndarray | None = None
+        self.std: np.ndarray | None = None
+        device = "cuda" if self.cfg.device == "cuda" and torch.cuda.is_available() else "cpu"
+        self.device = torch.device(device)
+        self._refresh_tensors()
+
+    def _refresh_tensors(self) -> None:
+        self._w_res = torch.as_tensor(self.w_res, device=self.device)
+        self._w_in = torch.as_tensor(self.w_in, device=self.device)
+        self._bias = torch.as_tensor(self.bias, device=self.device)
+        self._departure_dirs = torch.as_tensor(self.departure_dirs, device=self.device)
+        self._transition_dirs = torch.as_tensor(self.transition_dirs, device=self.device)
+        self._recurrence_proj = torch.as_tensor(self.recurrence_proj, device=self.device)
+
+    def _input(self, feat: np.ndarray, ts: np.ndarray) -> np.ndarray:
+        x = np.asarray(feat, dtype=np.float32).copy()
+        if x.shape[1] >= 2:
+            x[:, :2] = np.log1p(np.maximum(x[:, :2], 0.0))
+        t = np.asarray(ts, dtype=np.float64)
+        hour, week = (t / 3600.0) % 24.0, (t / 86400.0) % 7.0
+        return np.column_stack((x, np.sin(2*np.pi*hour/24), np.cos(2*np.pi*hour/24),
+                                 np.sin(2*np.pi*week/7), np.cos(2*np.pi*week/7))).astype(np.float32)
+
+    def fit_normalizer(self, edge_feat: np.ndarray, timestamps: np.ndarray,
+                       train_ids: np.ndarray) -> None:
+        x = self._input(edge_feat[train_ids], timestamps[train_ids])
+        self.mean = x.mean(axis=0, dtype=np.float64).astype(np.float32)
+        self.std = np.maximum(x.std(axis=0, dtype=np.float64), 1e-6).astype(np.float32)
+
+    def _encode(self, event_ids: np.ndarray, edge_feat: np.ndarray,
+                timestamps: np.ndarray, collator) -> dict[str, np.ndarray]:
+        if self.mean is None or self.std is None:
+            raise RuntimeError("fit_normalizer must be called before encoding")
+        ids = np.asarray(event_ids, dtype=np.int64)
+        contexts = collator.sample_event_ids(ids)
+        b = len(ids)
+        raw_lengths = np.asarray([len(c.event_ids) for c in contexts], dtype=np.int64)
+        width = int(raw_lengths.max()) if len(raw_lengths) else 0
+        x = np.zeros((b, width, self.input_dim), dtype=np.float32)
+        context_ts = np.full((b, width), np.nan, dtype=np.float64)
+        for row, context in enumerate(contexts):
+            if raw_lengths[row]:
+                x[row, :raw_lengths[row]] = self._input(
+                    context.edge_feat.numpy(), context.ts.numpy())
+                context_ts[row, :raw_lengths[row]] = context.ts.numpy()
+        x = (x - self.mean) / self.std
+        seed = (self._input(edge_feat[ids], timestamps[ids]) - self.mean) / self.std
+        with torch.inference_mode():
+            xt = torch.as_tensor(x, device=self.device)
+            ct = torch.as_tensor(context_ts, device=self.device)
+            lengths_t = torch.as_tensor(raw_lengths, dtype=torch.long, device=self.device)
+            steps = torch.arange(width, device=self.device)
+            active_mask = steps[None, :] < lengths_t[:, None]
+            bucket_end_mask = active_mask.clone()
+            if width > 1:
+                same_next = active_mask[:, 1:] & (ct[:, :-1] == ct[:, 1:])
+                bucket_end_mask[:, :-1] &= ~same_next
+            state = torch.zeros((b, self.cfg.state_dim), dtype=torch.float32, device=self.device)
+            trajectory = torch.zeros((b, width, self.cfg.state_dim), dtype=torch.float32, device=self.device)
+            bucket_sum = torch.zeros_like(state)
+            bucket_count = torch.zeros((b, 1), dtype=torch.float32, device=self.device)
+            bucket_index = torch.zeros(b, dtype=torch.long, device=self.device)
+            for step in range(width):
+                candidate = torch.tanh(xt[:, step] @ self._w_in.T + state @ self._w_res.T + self._bias)
+                active = active_mask[:, step, None]
+                bucket_sum += candidate * active
+                bucket_count += active
+                bucket_end = bucket_end_mask[:, step]
+                averaged = bucket_sum / torch.clamp(bucket_count, min=1.0)
+                updated = (1.0 - self.cfg.leak_rate) * state + self.cfg.leak_rate * averaged
+                state = torch.where(bucket_end[:, None], updated, state)
+                rows = torch.nonzero(bucket_end, as_tuple=False).flatten()
+                trajectory[rows, bucket_index[rows]] = updated[rows]
+                bucket_index += bucket_end.to(torch.long)
+                bucket_sum.masked_fill_(bucket_end[:, None], 0.0)
+                bucket_count.masked_fill_(bucket_end[:, None], 0.0)
+            bucket_lengths = bucket_index
+            seed_t = torch.as_tensor(seed, device=self.device)
+            h = (1.0 - self.cfg.leak_rate) * state + self.cfg.leak_rate * torch.tanh(
+                seed_t @ self._w_in.T + state @ self._w_res.T + self._bias)
+            d = h - state
+            departure = d @ self._departure_dirs.T
+            if width == 0:
+                surprise = torch.zeros_like(departure)
+                recurrence = torch.zeros_like(departure)
+            else:
+                previous = torch.cat((torch.zeros_like(trajectory[:, :1]), trajectory[:, :-1]), dim=1)
+                delta = trajectory - previous
+                projected = torch.einsum("btd,kd->btk", delta, self._transition_dirs)
+                target = d @ self._transition_dirs.T
+                valid = torch.arange(width, device=self.device)[None, :, None] < bucket_lengths[:, None, None]
+                less = ((projected < target[:, None]) & valid).sum(dim=1)
+                equal = ((projected == target[:, None]) & valid).sum(dim=1)
+                rank = (less + 0.5 * equal + 1.0) / (bucket_lengths[:, None] + 2.0)
+                surprise = -torch.log(torch.clamp(2.0 * torch.minimum(rank, 1.0-rank), min=1e-6))
+                history = torch.einsum("btd,krd->btkr", trajectory, self._recurrence_proj)
+                target_h = torch.einsum("bd,krd->bkr", h, self._recurrence_proj)
+                distance = torch.sqrt(((history - target_h[:, None]) ** 2).sum(dim=-1) + 1e-8)
+                distance = distance.masked_fill(~valid, float("inf"))
+                recurrence = distance.min(dim=1).values
+                no_history = (bucket_lengths == 0)[:, None]
+                surprise = torch.where(no_history, torch.zeros_like(surprise), surprise)
+                recurrence = torch.where(no_history, torch.zeros_like(recurrence), recurrence)
+        return {"departure": departure.cpu().numpy(), "surprise": surprise.cpu().numpy(),
+                "recurrence": recurrence.cpu().numpy(), "context_size": raw_lengths}
+
+    def _encode_ids(self, ids: np.ndarray, edge_feat: np.ndarray, timestamps: np.ndarray,
+                    collator) -> dict[str, np.ndarray]:
+        batches: dict[str, list[np.ndarray]] = {name: [] for name in (*self.families, "context_size")}
+        size = self.cfg.encode_batch_size
+        for start in range(0, len(ids), size):
+            result = self._encode(ids[start:start+size], edge_feat, timestamps, collator)
+            for name, value in result.items():
+                batches[name].append(value)
+        return {name: np.concatenate(values) if values else np.empty((0, self.cfg.projection_count), np.float32)
+                for name, values in batches.items()}
+
+    def fit(self, train_ids: np.ndarray, edge_feat: np.ndarray, timestamps: np.ndarray,
+            collator) -> "LocalLinkStreamESNIF":
+        train_ids = np.asarray(train_ids, dtype=np.int64)
+        if len(train_ids) < self.cfg.tree_sample_size:
+            raise ValueError("training split is smaller than tree_sample_size")
+        self.fit_normalizer(edge_feat, timestamps, train_ids)
+        used: set[int] = set()
+        counts = {name: 0 for name in self.families}
+        while any(count < self.cfg.trees_per_family for count in counts.values()):
+            for family in self.families:
+                if counts[family] >= self.cfg.trees_per_family:
+                    continue
+                ids = self.rng.choice(train_ids, size=self.cfg.tree_sample_size, replace=False)
+                used.update(map(int, ids))
+                representation = self._encode(ids, edge_feat, timestamps, collator)[family]
+                self.trees[family].append(_fit_local_tree(representation, self.cfg, self.rng))
+                counts[family] += 1
+        # Tree samples are global event ids from a contiguous train range.
+        # A boolean mask avoids the costly sort/hash in np.setdiff1d.
+        available_mask = np.ones(len(train_ids), dtype=bool)
+        used_array = np.fromiter(used, dtype=np.int64)
+        local_used = used_array[(used_array >= train_ids[0]) & (used_array <= train_ids[-1])] - train_ids[0]
+        available_mask[local_used] = False
+        available = train_ids[available_mask]
+        if len(available) == 0:
+            available = train_ids
+        calibration_ids = self.rng.choice(available, size=min(self.cfg.calibration_size, len(available)), replace=False)
+        calibration = self._encode_ids(calibration_ids, edge_feat, timestamps, collator)
+        for family in self.families:
+            self.reference_paths[family] = np.sort(self._path_mean(family, calibration[family]))
+        return self
+
+    def _path_mean(self, family: str, q: np.ndarray) -> np.ndarray:
+        return np.mean([tree.path_length(q) for tree in self.trees[family]], axis=0)
+
+    def score(self, event_ids: np.ndarray, edge_feat: np.ndarray, timestamps: np.ndarray,
+              collator, return_details: bool = False):
+        encoded = self._encode_ids(np.asarray(event_ids, dtype=np.int64), edge_feat, timestamps, collator)
+        scores: dict[str, np.ndarray] = {}
+        for family in self.families:
+            paths = self._path_mean(family, encoded[family])
+            reference = self.reference_paths[family]
+            scores[family] = 1.0 - np.searchsorted(reference, paths, side="right") / max(len(reference), 1)
+        final = np.mean(np.column_stack([scores[name] for name in self.families]), axis=1)
+        return (final, {**scores, "context_size": encoded["context_size"]}) if return_details else final
+
+    def metadata(self) -> dict[str, Any]:
+        return {"model_name": "LocalLinkStreamESNIF", "detection_level": "transaction",
+                "causal": True, "global_account_memory": False,
+                "weight_initialization": "DIF Normal(0,1), recurrent matrix rescaled to ESN operator norm",
+                "recurrent_operator_norm": self.recurrent_operator_norm,
+                "esn_contraction_constant": self.esn_contraction,
+                "echo_state_sufficient_condition": bool(self.esn_contraction < 1.0),
+                "device": str(self.device), "config": asdict(self.cfg),
+                "equal_timestamp_policy": "atomic_mean_candidate",
+                "split_families": list(self.families), "score_direction": "larger=more anomalous"}

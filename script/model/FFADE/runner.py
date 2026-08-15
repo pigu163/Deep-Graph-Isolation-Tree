@@ -79,13 +79,18 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _split_indices(n: int):
-    t = int(round(n * 0.6))
-    v = int(round(n * 0.2))
-    return {"train": (0, t), "val": (t, t + v), "test": (t + v, n)}
+    t = int(n * 0.7)
+    return {"train": (0, t), "test": (t, n)}
 
 
 def main() -> None:
     args = _parse_args()
+    if args.quick:
+        # Preserve the algorithm while making the documented smoke mode real.
+        args.embedding_size = min(args.embedding_size, 16)
+        args.M = min(args.M, 20)
+        args.epochs = min(args.epochs, 1)
+        args.online_train_steps = min(args.online_train_steps, 1)
     out_dir = run_dir(MODEL, args.dataset, args.protocol, args.seed)
     if out_dir.exists() and not args.overwrite:
         print(f"skip (exists, no --overwrite): {out_dir}")
@@ -98,11 +103,19 @@ def main() -> None:
 
         data = load_event_table(args.dataset)
         n_total = len(data["event_id"])
-        if args.max_samples is not None:
-            n_total = min(args.max_samples, n_total)
+        if args.max_samples is not None and args.max_samples < n_total:
+            # Smoke sampling keeps the *last* max_samples events. The head
+            # prefix of the IBM AML streams spans under one 1-hour bin
+            # (n_slices=1 -> degenerate single-slice F-FADE with a huge
+            # local F_FAC), while the tail spans hundreds of bins and
+            # exercises the normal online-update path.
+            start = n_total - args.max_samples
+            n_total = args.max_samples
+        else:
+            start = 0
         for k in ("event_id", "timestamp", "src", "dst", "label",
                   "label_available"):
-            data[k] = data[k][:n_total]
+            data[k] = data[k][start:start + n_total]
         log.write(f"loaded {n_total} events\n"); log.flush()
 
         policy = SLICE_POLICY[args.dataset]

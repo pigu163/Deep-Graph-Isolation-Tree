@@ -84,7 +84,7 @@ def main() -> None:
     parser.add_argument("--with-context", action="store_true")
     parser.add_argument("--num-hops", type=int, default=1)
     parser.add_argument("--max-neighbors", type=int, default=20)
-    parser.add_argument("--time-window", type=float, default=None)
+    parser.add_argument("--time-window", type=float, default=7 * 24 * 60 * 60)
     args = parser.parse_args()
 
     utils.set_seed(args.seed)

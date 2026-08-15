@@ -57,9 +57,8 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _split_indices(n: int):
-    t = int(round(n * 0.6))
-    v = int(round(n * 0.2))
-    return {"train": (0, t), "val": (t, t + v), "test": (t + v, n)}
+    t = int(n * 0.7)
+    return {"train": (0, t), "test": (t, n)}
 
 
 def main() -> None:

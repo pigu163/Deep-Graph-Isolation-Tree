@@ -49,10 +49,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="replace an existing processed output directory")
     parser.add_argument("--build-pair-index", action="store_true",
                         help="also build the directed (src, dst) pair index")
-    parser.add_argument("--train-ratio", type=float, default=0.6,
-                        help="fraction of events in the train split (default: 0.6)")
-    parser.add_argument("--val-ratio", type=float, default=0.2,
-                        help="fraction of events in the val split (default: 0.2)")
+    parser.add_argument("--train-ratio", type=float, default=0.7,
+                        help="fraction of events in the train split (default: 0.7)")
+    parser.add_argument("--val-ratio", type=float, default=0.0,
+                        help="fraction of events in the validation split (default: 0.0)")
     parser.add_argument("--chunk-size", type=int, default=None,
                         help="reserved for future chunked CSV reading; lazy "
                              "scanning is used by default")

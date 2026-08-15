@@ -68,13 +68,18 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _split_indices(n: int):
-    t = int(round(n * 0.6))
-    v = int(round(n * 0.2))
-    return {"train": (0, t), "val": (t, t + v), "test": (t + v, n)}
+    t = int(n * 0.7)
+    return {"train": (0, t), "test": (t, n)}
 
 
 def main() -> None:
     args = _parse_args()
+    if args.quick:
+        args.n_epochs = min(args.n_epochs, 1)
+        args.n_neighbors = min(args.n_neighbors, 5)
+        args.message_dim = min(args.message_dim, 32)
+        args.memory_dim = min(args.memory_dim, 64)
+        args.batch_size = max(args.batch_size, 256)
     out_dir = run_dir(MODEL, args.dataset, args.protocol, args.seed)
     if out_dir.exists() and not args.overwrite:
         print(f"skip (exists, no --overwrite): {out_dir}")

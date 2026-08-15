@@ -293,8 +293,7 @@ class MAD:
 
 
 def _split_of_event(splits: dict, event_id: int) -> str:
-    for name in ("train", "val", "test"):
-        lo, hi = splits[name]
+    for name, (lo, hi) in splits.items():
         if lo <= event_id < hi:
             return name
     return "none"

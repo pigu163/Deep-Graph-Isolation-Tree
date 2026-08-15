@@ -93,9 +93,8 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _split_indices(n: int):
-    t = int(round(n * 0.6))
-    v = int(round(n * 0.2))
-    return {"train": (0, t), "val": (t, t + v), "test": (t + v, n)}
+    t = int(n * 0.7)
+    return {"train": (0, t), "test": (t, n)}
 
 
 def main() -> None:
@@ -124,6 +123,13 @@ def main() -> None:
     deas = not args.no_deas
     hidden_dim = args.hidden_dim if args.hidden_dim is not None \
         else DEFAULT_CONFIG["hidden_dim"]
+    if args.quick:
+        # Same faithful algorithm, but a genuinely small smoke configuration.
+        args.n_representations = min(args.n_representations, 2)
+        args.trees_per_representation = min(args.trees_per_representation, 2)
+        args.hidden_dim = args.hidden_dim or [32]
+        hidden_dim = args.hidden_dim
+        args.rep_dim = min(args.rep_dim, 8)
     paper_fidelity = "paper_guided_temporal_reimplementation" if cere else "simplified"
 
     from script.model.DIF.dif import DIF

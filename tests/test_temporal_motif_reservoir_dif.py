@@ -10,6 +10,8 @@ import pytest
 from script.model.new_model import temporal_motif_reservoir_dif as model_module
 from script.model.new_model.temporal_motif_reservoir_dif import (
     ContractiveReservoir,
+    LocalLinkStreamConfig,
+    LocalLinkStreamESNIF,
     ReservoirConfig,
     TemporalMotifReservoirDIF,
 )
@@ -132,3 +134,36 @@ def test_cuda_bank_matches_cpu():
         np.testing.assert_array_equal(cuda_nodes, cpu_nodes)
         np.testing.assert_allclose(
             cuda_values, cpu_values, rtol=2e-4, atol=2e-5)
+
+
+def test_local_esn_equal_timestamp_context_is_order_invariant():
+    torch = pytest.importorskip("torch")
+
+    class Context:
+        def __init__(self, features):
+            self.event_ids = torch.tensor([0, 1])
+            self.edge_feat = torch.tensor(features, dtype=torch.float32)
+            self.ts = torch.tensor([1.0, 1.0], dtype=torch.float64)
+
+    class Collator:
+        def __init__(self, context):
+            self.context = context
+
+        def sample_event_ids(self, ids):
+            return [self.context for _ in ids]
+
+    cfg = LocalLinkStreamConfig(state_dim=8, projection_count=3, device="cpu")
+    feature_a = np.array([[1.0, 2.0, 0.5], [3.0, 1.0, -0.5]])
+    feature_b = feature_a[::-1].copy()
+    edge_features = np.vstack((feature_a, [[2.0, 2.0, 0.0]])).astype(np.float32)
+    timestamps = np.array([1.0, 1.0, 2.0])
+
+    first = LocalLinkStreamESNIF(edge_dim=3, config=cfg, seed=23)
+    second = LocalLinkStreamESNIF(edge_dim=3, config=cfg, seed=23)
+    first.fit_normalizer(edge_features, timestamps, np.arange(3))
+    second.fit_normalizer(edge_features, timestamps, np.arange(3))
+
+    encoded_a = first._encode(np.array([2]), edge_features, timestamps, Collator(Context(feature_a)))
+    encoded_b = second._encode(np.array([2]), edge_features, timestamps, Collator(Context(feature_b)))
+    for name in ("departure", "surprise", "recurrence"):
+        np.testing.assert_allclose(encoded_a[name], encoded_b[name], rtol=1e-6, atol=1e-6)

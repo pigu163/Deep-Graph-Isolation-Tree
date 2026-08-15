@@ -34,11 +34,13 @@ def collect_rows(protocol: str) -> list[dict]:
     for metrics_path in sorted(RESULT_ROOT.glob(f"*/*/{protocol}/seed_*/metrics.json")):
         parts = metrics_path.parts
         model, dataset, seed = parts[-5], parts[-4], parts[-2].removeprefix("seed_")
-        # quick runs (is_quick_run=true) must never enter the formal summary
+        # quick runs (is_quick_run=true) and sample-limited runs
+        # (max_samples_used != null) must never enter the formal summary
         cfg_path = metrics_path.parent / "config.json"
         if cfg_path.exists():
             try:
-                if json.loads(cfg_path.read_text()).get("is_quick_run"):
+                cfg = json.loads(cfg_path.read_text())
+                if cfg.get("is_quick_run") or cfg.get("max_samples_used") is not None:
                     continue
             except Exception:
                 pass

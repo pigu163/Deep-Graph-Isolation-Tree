@@ -1,4 +1,4 @@
-"""Temporal Motif-Conditioned contractive reservoir isolation forest."""
-from .temporal_motif_reservoir_dif import ReservoirConfig, TemporalMotifReservoirDIF
+"""Pair-centric local link-stream ESN isolation forest exports."""
+from .temporal_motif_reservoir_dif import LocalLinkStreamConfig, LocalLinkStreamESNIF
 
-__all__ = ["ReservoirConfig", "TemporalMotifReservoirDIF"]
+__all__ = ["LocalLinkStreamConfig", "LocalLinkStreamESNIF"]

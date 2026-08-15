@@ -35,6 +35,11 @@ import numpy as np
 import polars as pl
 
 from .preprocessing import TabularPreprocessor
+from .temporal_features import (
+    ELLIPTIC_TEMPORAL_NAMES, EVENT_TEMPORAL_NAMES,
+    elliptic_temporal_features, event_temporal_features,
+)
+from .transforms import StandardScaler
 from .schema import (
     ELLIPTIC_ALL_COUNT,
     ELLIPTIC_CLASSES_CSV,
@@ -52,8 +57,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DATA_ROOT = REPO_ROOT / "data"
 DEFAULT_OUTPUT_ROOT = DATA_ROOT / "processed_tabular"
 
-SPLIT_RATIOS = {"train": 0.6, "val": 0.2, "test": 0.2}
-_SPLIT_ORDER = ["train", "val", "test"]
+SPLIT_RATIOS = {"train": 0.7, "test": 0.3}
+_SPLIT_ORDER = ["train", "test"]
 
 
 @dataclass
@@ -189,13 +194,8 @@ def _build_raw_frame(dataset_name: str, elliptic_features: str) -> pl.DataFrame:
 
 
 def _make_splits(n_rows: int) -> dict[str, list[int]]:
-    t = int(round(n_rows * SPLIT_RATIOS["train"]))
-    v = int(round(n_rows * SPLIT_RATIOS["val"]))
-    return {
-        "train": [0, t],
-        "val": [t, t + v],
-        "test": [t + v, n_rows],
-    }
+    t = int(n_rows * SPLIT_RATIOS["train"])
+    return {"train": [0, t], "test": [t, n_rows]}
 
 
 # ---------------------------------------------------------------------------
@@ -248,8 +248,27 @@ def build_tabular_dataset(
     splits = _make_splits(n)
     train_end = splits["train"][1]
     pre = TabularPreprocessor(schema).fit(raw.head(train_end))
-    X = pre.transform(raw)
-    feature_names = pre.feature_names
+    X_static = pre.transform(raw)
+    static_feature_names = pre.feature_names
+
+    # Causal temporal view: features for an event are calculated before the
+    # whole same-timestamp group is inserted into account/pair history.
+    if dataset_name == "elliptic_pp":
+        temporal_raw = elliptic_temporal_features(timestamps)
+        temporal_names = ELLIPTIC_TEMPORAL_NAMES
+    else:
+        temporal_raw = event_temporal_features(
+            np.asarray(raw["src"].to_numpy(), dtype=np.int64),
+            np.asarray(raw["dst"].to_numpy(), dtype=np.int64), timestamps)
+        temporal_names = EVENT_TEMPORAL_NAMES
+    temporal_scalers = [StandardScaler().fit(temporal_raw[:train_end, i])
+                        for i in range(temporal_raw.shape[1])]
+    X_temporal = np.column_stack([
+        scaler.transform(temporal_raw[:, i])
+        for i, scaler in enumerate(temporal_scalers)
+    ]).astype(np.float32)
+    X = np.column_stack([X_static, X_temporal]).astype(np.float32)
+    feature_names = static_feature_names + temporal_names
 
     # ---- write outputs -----------------------------------------------------
     _write_json(out_dir / "splits.json", splits, overwrite)
@@ -271,10 +290,13 @@ def build_tabular_dataset(
             "numeric": list(schema.numeric),
             "frequency_encoded": [f"{c}_freq" for c in schema.freq],
             "categorical_one_hot": list(schema.categorical),
+            "temporal_past_only": temporal_names,
         },
         "elliptic_features_mode": elliptic_features
         if dataset_name == "elliptic_pp" else None,
-        "notes": list(schema.notes),
+        "notes": list(schema.notes) + [
+            "Temporal features are score-before-update and same-timestamp isolated."
+        ],
     }
     _write_json(out_dir / "feature_schema.json", schema_info, overwrite)
     _write_json(out_dir / "preprocessing.json", pre.state_summary(), overwrite)
@@ -285,7 +307,6 @@ def build_tabular_dataset(
         "n_features": int(X.shape[1]),
         "splits": splits,
         "n_train": splits["train"][1] - splits["train"][0],
-        "n_val": splits["val"][1] - splits["val"][0],
         "n_test": splits["test"][1] - splits["test"][0],
         "n_positive": int((y == 1).sum()),
         "n_unknown_label": int((y == -1).sum()),
@@ -294,7 +315,9 @@ def build_tabular_dataset(
         else "(time_step, txId) chronological",
         "elliptic_features_mode": elliptic_features
         if dataset_name == "elliptic_pp" else None,
-        "notes": list(schema.notes),
+        "notes": list(schema.notes) + [
+            "static + strict past-only temporal feature view"
+        ],
     }
     _write_json(out_dir / "metadata.json", metadata, overwrite)
     return out_dir

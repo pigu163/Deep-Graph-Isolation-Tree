@@ -11,7 +11,7 @@ neighbor finder); only the data plumbing is adapted:
   (the official Memory arrays index nodes directly; our canonical ids are
   contiguous but remapping guarantees safety and matches the official
   assumption);
-- chronological splits come from data/processed/*/splits.json (60/20/20)
+- chronological train/test split comes from data/processed/*/splits.json (70/30)
   instead of the official training-ratio quantile split;
 - evaluation uses our shared metric code (unknown labels excluded), scoring
   train/val/test with a past-only neighbor finder built over full data.
@@ -175,6 +175,9 @@ def run_slade(events: dict, splits: dict[str, tuple[int, int]],
     fit_seconds = time.perf_counter() - fit_started
     score_started = time.perf_counter()
     # score all splits with a full past-only neighbor finder
+    # Training memory ends at the train boundary; scoring replays the full
+    # chronological stream from event zero, so retain weights but reset state.
+    model.memory.__init_memory__()
     model.set_neighbor_finder(full_ngh_finder)
     scores = score_events(model, full_data, batch_size, n_neighbors, dev)
     timing = {"fit_seconds": fit_seconds, "score_seconds": time.perf_counter() - score_started}

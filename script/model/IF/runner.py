@@ -62,10 +62,9 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _split_indices(n: int):
-    """60/20/20 chronological split indices on the scored array."""
-    t = int(round(n * 0.6))
-    v = int(round(n * 0.2))
-    return {"train": (0, t), "val": (t, t + v), "test": (t + v, n)}
+    """70/30 chronological train/test split indices."""
+    t = int(n * 0.7)
+    return {"train": (0, t), "test": (t, n)}
 
 
 def main() -> None:

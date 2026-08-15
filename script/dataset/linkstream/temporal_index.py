@@ -5,8 +5,9 @@ separately for out / in / incident relations, plus an optional directed-pair
 index.  Queries are pure binary searches over sorted segments
 (`numpy.searchsorted`); no full-table scans are involved.
 
-Leakage rule (section 4.2 of the task): a query for event `i` returns only
-event ids strictly smaller than `i`, regardless of equal timestamps.
+Leakage rule: a query for event `i` returns only events whose timestamp is
+strictly earlier than `timestamps[i]`. Equal-time events form one atomic
+timestamp bucket and are never used as one another's history.
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ def _build_csr(group_ids: np.ndarray, values: np.ndarray, num_groups: int):
     within every group.  The returned array is `values[order]`, i.e. the
     actual event ids in per-group temporal order.
     """
-    order = np.argsort(group_ids, kind="stable")
+    order = np.lexsort((values, group_ids))
     sorted_groups = group_ids[order]
     counts = np.bincount(sorted_groups, minlength=num_groups)
     offsets = np.zeros(num_groups + 1, dtype=np.int64)
@@ -95,17 +96,13 @@ class TemporalNeighborIndex:
 
         src_offsets, src_event_ids = _build_csr(src, event_ids, num_nodes)
         dst_offsets, dst_event_ids = _build_csr(dst, event_ids, num_nodes)
-        # Interleave (src_i, dst_i) per event so that each group keeps its
-        # event ids in ascending order (a naive concatenate([src, dst]) puts
-        # every src before every dst and breaks in-group ordering, which the
-        # binary-search leakage guard relies on).
-        n = num_events
-        incident_groups = np.empty(2 * n, dtype=src.dtype)
-        incident_vals = np.empty(2 * n, dtype=event_ids.dtype)
-        incident_groups[0::2] = src
-        incident_groups[1::2] = dst
-        incident_vals[0::2] = event_ids
-        incident_vals[1::2] = event_ids
+        # Interleave (src_i, dst_i) per event so each group preserves global
+        # temporal order. A naive concatenate([src, dst]) breaks the required
+        # non-decreasing timestamp order inside an incident segment.
+        # A self-loop is one incident interaction, not two copies of one edge.
+        keep_dst = dst != src
+        incident_groups = np.concatenate((src, dst[keep_dst]))
+        incident_vals = np.concatenate((event_ids, event_ids[keep_dst]))
         node_offsets, node_event_ids = _build_csr(
             incident_groups, incident_vals, num_nodes)
 
@@ -197,15 +194,17 @@ class TemporalNeighborIndex:
         max_events: int | None,
         time_window: float | None,
     ) -> np.ndarray:
-        """Return seg_event_ids[start:end] with ids strictly < event_id.
+        """Return events whose timestamp is strictly before ``event_id``.
 
         `seg_event_ids` ascending, `seg_ts` non-decreasing (guaranteed by the
         stable global sort).  With `time_window`, only events with
         ts >= ts[event_id] - window are returned.  The most recent
         `max_events` events are kept when a cap is given.
         """
-        # ids strictly smaller than the current event (safe with ties).
-        end = int(np.searchsorted(seg_event_ids, event_id, side="left"))
+        # ``side='left'`` makes an equal-time bucket atomic: CSV row order
+        # cannot make one simultaneous transaction historical to another.
+        current_ts = float(self.timestamps[event_id])
+        end = int(np.searchsorted(seg_ts, current_ts, side="left"))
         start = 0
         if time_window is not None:
             lower_ts = float(self.timestamps[event_id]) - float(time_window)
@@ -298,6 +297,7 @@ class TemporalSubgraph:
     ts: torch.Tensor
     edge_feat: torch.Tensor | None
 
+    is_valid: bool
 
 @dataclass
 class TemporalNeighborBatch:
@@ -360,17 +360,23 @@ def sample_temporal_subgraph(
     max_neighbors: int = 20,
     time_window: float | None = None,
     direction: str = "both",
+    max_context_events: int | None = 500,
+    min_context_events: int = 64,
 ) -> TemporalSubgraph:
     """Sample the past temporal neighborhood of `event_id`.
 
     BFS expansion: start from {src, dst} of the current event, query only
-    past incident/out/in events (strictly before `event_id`), keep at most
+    past incident/out/in events (timestamp strictly before the seed), keep at most
     `max_neighbors` most recent events per node per hop, and never include
     the current or future events.  `direction` selects which history is used
     per node: "out", "in" or "both".
     """
     if num_hops < 1:
         raise ValueError("num_hops must be >= 1")
+    if max_context_events is not None and max_context_events < 1:
+        raise ValueError("max_context_events must be >= 1 or None")
+    if min_context_events < 0:
+        raise ValueError("min_context_events must be >= 0")
     if direction not in ("out", "in", "both"):
         raise ValueError("direction must be 'out', 'in' or 'both'")
     if event_id < 0 or event_id >= index.num_events:
@@ -382,27 +388,39 @@ def sample_temporal_subgraph(
         "both": index.get_past_incident_events,
     }[direction]
 
-    selected: set[int] = set()
-    frontier: set[int] = {int(src_arr[event_id]), int(dst_arr[event_id])}
-    for _ in range(num_hops):
-        next_frontier: set[int] = set()
-        for node in frontier:
-            hist = hist_fn(node, event_id, max_events=max_neighbors,
-                           time_window=time_window)
-            selected.update(int(e) for e in hist)
-            if selected:
+    src, dst = int(src_arr[event_id]), int(dst_arr[event_id])
+    if num_hops == 1:
+        # This is the production configuration.  Merge the two sorted CSR
+        # slices in NumPy instead of constructing a Python BFS/set per seed.
+        left = hist_fn(src, event_id, max_events=max_neighbors, time_window=time_window)
+        right = left if src == dst else hist_fn(
+            dst, event_id, max_events=max_neighbors, time_window=time_window)
+        event_ids = np.unique(left) if src == dst else np.union1d(left, right)
+    else:
+        selected: set[int] = set()
+        frontier: set[int] = {src, dst}
+        for _ in range(num_hops):
+            next_frontier: set[int] = set()
+            for node in frontier:
+                hist = hist_fn(node, event_id, max_events=max_neighbors,
+                               time_window=time_window)
+                selected.update(int(e) for e in hist)
                 next_frontier.update(int(src_arr[e]) for e in hist)
                 next_frontier.update(int(dst_arr[e]) for e in hist)
-        frontier = next_frontier
+            frontier = next_frontier
+        event_ids = np.array(sorted(selected), dtype=np.int64)
 
-    event_ids = np.array(sorted(selected), dtype=np.int64)
+    if max_context_events is not None:
+        # Event ids are chronological: retain the nearest history to the seed.
+        event_ids = event_ids[-max_context_events:]
     # Unique involved nodes: current endpoints + nodes of selected history.
-    node_ids = sorted({int(src_arr[event_id]), int(dst_arr[event_id])}
-                      | {int(n) for e in event_ids for n in (src_arr[e], dst_arr[e])})
+    node_ids = np.unique(np.concatenate((
+        np.array([src, dst], dtype=np.int64), src_arr[event_ids], dst_arr[event_ids],
+    ))).astype(np.int64, copy=False)
 
     sub_src = src_arr[event_ids].astype(np.int64)
     sub_dst = dst_arr[event_ids].astype(np.int64)
-    sub_ts = ts_arr[event_ids].astype(np.float32)
+    sub_ts = ts_arr[event_ids].astype(np.float64, copy=False)
     sub_feat = None if edge_feat is None else np.asarray(
         edge_feat[event_ids], dtype=np.float32)
 
@@ -413,4 +431,5 @@ def sample_temporal_subgraph(
         dst=torch.from_numpy(sub_dst),
         ts=torch.from_numpy(sub_ts),
         edge_feat=None if sub_feat is None else torch.from_numpy(sub_feat),
+        is_valid=len(event_ids) >= min_context_events,
     )

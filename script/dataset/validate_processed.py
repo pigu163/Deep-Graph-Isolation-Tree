@@ -104,9 +104,8 @@ def validate_dataset(out_dir: Path, verbose: bool = True) -> tuple[bool, list[st
     # ---- splits -----------------------------------------------------------------
     splits = utils.read_json(out_dir / schema.SPLITS_JSON)
     try:
-        tr, va, te = splits["train"], splits["val"], splits["test"]
-        ok = (tr[0] == 0 and te[1] == N and tr[1] == va[0] and va[1] == te[0]
-              and 0 <= tr[0] <= tr[1] <= va[1] <= te[1])
+        tr, te = splits["train"], splits["test"]
+        ok = (tr[0] == 0 and tr[1] == te[0] and te[1] == N and 0 <= tr[1] <= N)
     except (KeyError, IndexError, TypeError):
         ok = False
     _check(ok, "splits contiguous and cover [0, N)", errors, verbose)
@@ -120,7 +119,7 @@ def validate_dataset(out_dir: Path, verbose: bool = True) -> tuple[bool, list[st
     for name, offsets, ids, expected_len in (
             ("src", index.src_offsets, index.src_event_ids, N),
             ("dst", index.dst_offsets, index.dst_event_ids, N),
-            ("node", index.node_offsets, index.node_event_ids, 2 * N)):
+            ("node", index.node_offsets, index.node_event_ids, N + int((src != dst).sum()))):
         _check(len(offsets) == num_nodes + 1
                and np.all(np.diff(offsets) >= 0)
                and offsets[0] == 0 and offsets[-1] == expected_len,
